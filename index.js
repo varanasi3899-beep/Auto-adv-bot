@@ -21,6 +21,7 @@ const path = require('path');
 
 const ALLOWED_GUILDS = ['1493598034544820284', '1402276801065123942'];
 const ADMIN_USER_ID = '1277163202614001706';
+const ALLOWED_ROLES = ['1411527879162069022', '1512135398472548623'];
 const CONFIG_FILE = path.join(__dirname, 'campaign_config.json');
 const PROXIES_FILE = path.join(__dirname, 'proxies.json');
 
@@ -359,6 +360,15 @@ controlBot.on('interactionCreate', async interaction => {
                 }
             }
             else if (interaction.commandName === 'panel') {
+                const memberRoles = interaction.member.roles;
+                const hasRole = memberRoles instanceof Array 
+                    ? memberRoles.some(rId => ALLOWED_ROLES.includes(rId))
+                    : (memberRoles.cache ? memberRoles.cache.some(role => ALLOWED_ROLES.includes(role.id)) : false);
+
+                if (!hasRole && interaction.user.id !== ADMIN_USER_ID) {
+                    return interaction.reply({ content: '❌ You do not have the required role to use this command.', ephemeral: true });
+                }
+
                 const embed = new EmbedBuilder()
                     .setTitle('🚀 Elite Broadcast Automation Suite')
                     .setDescription('Welcome to the enterprise-grade automated broadcasting dashboard. Launch, configure, and manage your continuous engagement campaigns securely and efficiently.\n\n**💡 Management Commands:**\n• Use `/adv status` to check your running campaign metrics.\n• Use `/adv stop` to safely terminate an active broadcast loop.')
