@@ -361,9 +361,9 @@ controlBot.on('interactionCreate', async interaction => {
             else if (interaction.commandName === 'panel') {
                 const embed = new EmbedBuilder()
                     .setTitle('🚀 Elite Broadcast Automation Suite')
-                    .setDescription('Leverage our enterprise-grade, dedicated 1:1 proxy infrastructure for maximum deliverability. Each active session is exclusively bound to a unique proxy from your private pool, ensuring anonymity and performance.\n\n**⚠️ Operation Critical:** The system will aggressively enforce a strict proxy-to-session ratio. **If your proxy pool is exhausted, all new campaign initialization requests will be refused instantly.**')
+                    .setDescription('Welcome to the enterprise-grade automated broadcasting dashboard. Launch and manage your continuous engagement campaigns securely and efficiently.\n\n**💡 Management Commands:**\n• Use `/adv status` to check your running campaign metrics.\n• Use `/adv stop` to safely terminate an active broadcast loop.')
                     .setColor(0x5865F2)
-                    .addFields({ name: 'System Integrity', value: 'Ensure your proxy pool remains stocked to maintain continuous, uninterrupted service.', inline: false })
+                    .addFields({ name: 'System Integrity', value: 'Ensure proper configurations are set to maintain continuous, uninterrupted service.', inline: false })
                     .setFooter({ text: 'Broadcast Control Panel' })
                     .setTimestamp();
 
@@ -384,7 +384,6 @@ controlBot.on('interactionCreate', async interaction => {
                         .setTitle('📊 Advertisement Status Report')
                         .addFields(
                             { name: 'Status', value: advState.isRunning ? '🟢 Running' : '🔴 Stopped', inline: true },
-                            { name: 'Assigned Unique Proxy', value: advState.currentProxy ? `\`${advState.currentProxy.replace(/:([^:@]+)@/, ':****@')}\`` : 'None', inline: true },
                             { name: 'Messages Sent', value: `${advState.sentCount}`, inline: true },
                             { name: 'Failed Attempts', value: `${advState.failCount}`, inline: true },
                             { name: 'Delay Range', value: `${advState.minDelay}s - ${advState.maxDelay}s`, inline: false }
@@ -453,7 +452,7 @@ controlBot.on('interactionCreate', async interaction => {
             const pool = getProxyPool();
             if (pool.length === 0) {
                 return interaction.reply({ 
-                    content: '❌ **Proxy Pool Exhausted!** Campaign blocked because no free proxies are available. Add more proxies using `/admin_proxies`.', 
+                    content: '❌ **Resource Pool Exhausted!** Campaign blocked because no resources are available. Contact an administrator.', 
                     ephemeral: true 
                 });
             }
@@ -511,7 +510,7 @@ controlBot.on('interactionCreate', async interaction => {
             initializeAndRunSelfbot(token, assignedProxy, false);
 
             await interaction.editReply({ 
-                content: `🚀 **Campaign Initialized Safely!**\nTargeting **${channels.length} channel(s)**.\nAssigned Proxy: \`${assignedProxy.replace(/:([^:@]+)@/, ':****@')}\`` 
+                content: `🚀 **Campaign Initialized Safely!**\nTargeting **${channels.length} channel(s)**.` 
             });
         }
     } catch (error) {
