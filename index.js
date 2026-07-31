@@ -361,7 +361,7 @@ controlBot.on('interactionCreate', async interaction => {
             else if (interaction.commandName === 'panel') {
                 const embed = new EmbedBuilder()
                     .setTitle('🚀 Elite Broadcast Automation Suite')
-                    .setDescription('Welcome to the enterprise-grade automated broadcasting dashboard. Launch and manage your continuous engagement campaigns securely and efficiently.\n\n**💡 Management Commands:**\n• Use `/adv status` to check your running campaign metrics.\n• Use `/adv stop` to safely terminate an active broadcast loop.')
+                    .setDescription('Welcome to the enterprise-grade automated broadcasting dashboard. Launch, configure, and manage your continuous engagement campaigns securely and efficiently.\n\n**💡 Management Commands:**\n• Use `/adv status` to check your running campaign metrics.\n• Use `/adv stop` to safely terminate an active broadcast loop.')
                     .setColor(0x5865F2)
                     .addFields({ name: 'System Integrity', value: 'Ensure proper configurations are set to maintain continuous, uninterrupted service.', inline: false })
                     .setFooter({ text: 'Broadcast Control Panel' })
@@ -369,10 +369,15 @@ controlBot.on('interactionCreate', async interaction => {
 
                 const row = new ActionRowBuilder().addComponents(
                     new ButtonBuilder()
-                        .setCustomId('open_adv_modal')
+                        .setCustomId('start_adv_direct')
                         .setLabel('Start Advertising')
                         .setStyle(ButtonStyle.Success)
-                        .setEmoji('🚀')
+                        .setEmoji('🚀'),
+                    new ButtonBuilder()
+                        .setCustomId('open_adv_modal')
+                        .setLabel('Config')
+                        .setStyle(ButtonStyle.Primary)
+                        .setEmoji('⚙️')
                 );
 
                 await interaction.reply({ embeds: [embed], components: [row], ephemeral: true });
@@ -402,61 +407,96 @@ controlBot.on('interactionCreate', async interaction => {
                 }
             }
         }
-        else if (interaction.isButton() && interaction.customId === 'open_adv_modal') {
-            const modal = new ModalBuilder()
-                .setCustomId('adv_config_modal')
-                .setTitle('Configure Campaign');
+        else if (interaction.isButton()) {
+            if (interaction.customId === 'start_adv_direct') {
+                if (advState.isRunning) {
+                    return interaction.reply({ content: '⚠️ Advertising automation is already running.', ephemeral: true });
+                }
 
-            const tokenInput = new TextInputBuilder()
-                .setCustomId('adv_token')
-                .setLabel('Discord User Token')
-                .setStyle(TextInputStyle.Short)
-                .setPlaceholder('Paste user token here...')
-                .setRequired(true);
+                const savedCfg = loadCampaignConfig();
+                if (!savedCfg || !savedCfg.userToken || !savedCfg.targetChannels || savedCfg.targetChannels.length === 0 || !savedCfg.messageContent) {
+                    return interaction.reply({ content: '❌ No saved campaign configuration found. Please click **Config** first to set up your token, channels, and message.', ephemeral: true });
+                }
 
-            const channelsInput = new TextInputBuilder()
-                .setCustomId('adv_channels')
-                .setLabel('Channel IDs (Comma separated)')
-                .setStyle(TextInputStyle.Short)
-                .setPlaceholder('123456789012345678, 876543210987654321')
-                .setRequired(true);
+                const pool = getProxyPool();
+                if (pool.length === 0) {
+                    return interaction.reply({ content: '❌ **Resource Pool Exhausted!** No resources available.', ephemeral: true });
+                }
 
-            const messageInput = new TextInputBuilder()
-                .setCustomId('adv_message')
-                .setLabel('Advertisement Message')
-                .setStyle(TextInputStyle.Paragraph)
-                .setPlaceholder('Type your advertisement message here...')
-                .setRequired(true);
+                const assignedProxy = pool.shift();
+                saveProxyPool(pool);
 
-            const delayInput = new TextInputBuilder()
-                .setCustomId('adv_delay')
-                .setLabel('Delay Range (Min-Max Seconds, e.g. 90-180)')
-                .setStyle(TextInputStyle.Short)
-                .setPlaceholder('90-180')
-                .setRequired(true);
+                await interaction.deferReply({ ephemeral: true });
 
-            modal.addComponents(
-                new ActionRowBuilder().addComponents(tokenInput),
-                new ActionRowBuilder().addComponents(channelsInput),
-                new ActionRowBuilder().addComponents(messageInput),
-                new ActionRowBuilder().addComponents(delayInput)
-            );
+                advState.targetChannels = savedCfg.targetChannels;
+                advState.messageContent = savedCfg.messageContent;
+                advState.minDelay = savedCfg.minDelay || 90;
+                advState.maxDelay = savedCfg.maxDelay || 180;
+                advState.userToken = savedCfg.userToken;
+                advState.currentProxy = assignedProxy;
 
-            await interaction.showModal(modal);
-        }
-        else if (interaction.isModalSubmit() && interaction.customId === 'adv_config_modal') {
-            if (advState.isRunning) {
-                return interaction.reply({ content: '⚠️ An advertising process is already active. Stop it first using `/adv stop`.', ephemeral: true });
-            }
+                saveCampaignConfig({
+                    ...savedCfg,
+                    isRunning: true,
+                    currentProxy: assignedProxy
+                });
 
-            const pool = getProxyPool();
-            if (pool.length === 0) {
-                return interaction.reply({ 
-                    content: '❌ **Resource Pool Exhausted!** Campaign blocked because no resources are available. Contact an administrator.', 
-                    ephemeral: true 
+                initializeAndRunSelfbot(savedCfg.userToken, assignedProxy, false);
+
+                await interaction.editReply({ 
+                    content: `🚀 **Campaign Started Successfully!**\nTargeting **${savedCfg.targetChannels.length} channel(s)**.` 
                 });
             }
+            else if (interaction.customId === 'open_adv_modal') {
+                const savedCfg = loadCampaignConfig();
 
+                const modal = new ModalBuilder()
+                    .setCustomId('adv_config_modal')
+                    .setTitle('Configure Campaign');
+
+                const tokenInput = new TextInputBuilder()
+                    .setCustomId('adv_token')
+                    .setLabel('Discord User Token')
+                    .setStyle(TextInputStyle.Short)
+                    .setPlaceholder('Paste user token here...')
+                    .setValue(savedCfg && savedCfg.userToken ? savedCfg.userToken : '')
+                    .setRequired(true);
+
+                const channelsInput = new TextInputBuilder()
+                    .setCustomId('adv_channels')
+                    .setLabel('Channel IDs (Comma separated)')
+                    .setStyle(TextInputStyle.Short)
+                    .setPlaceholder('123456789012345678, 876543210987654321')
+                    .setValue(savedCfg && savedCfg.targetChannels ? savedCfg.targetChannels.join(', ') : '')
+                    .setRequired(true);
+
+                const messageInput = new TextInputBuilder()
+                    .setCustomId('adv_message')
+                    .setLabel('Advertisement Message')
+                    .setStyle(TextInputStyle.Paragraph)
+                    .setPlaceholder('Type your advertisement message here...')
+                    .setValue(savedCfg && savedCfg.messageContent ? savedCfg.messageContent : '')
+                    .setRequired(true);
+
+                const delayInput = new TextInputBuilder()
+                    .setCustomId('adv_delay')
+                    .setLabel('Delay Range (Min-Max Seconds, e.g. 90-180)')
+                    .setStyle(TextInputStyle.Short)
+                    .setPlaceholder('90-180')
+                    .setValue(savedCfg && savedCfg.minDelay && savedCfg.maxDelay ? `${savedCfg.minDelay}-${savedCfg.maxDelay}` : '90-180')
+                    .setRequired(true);
+
+                modal.addComponents(
+                    new ActionRowBuilder().addComponents(tokenInput),
+                    new ActionRowBuilder().addComponents(channelsInput),
+                    new ActionRowBuilder().addComponents(messageInput),
+                    new ActionRowBuilder().addComponents(delayInput)
+                );
+
+                await interaction.showModal(modal);
+            }
+        }
+        else if (interaction.isModalSubmit() && interaction.customId === 'adv_config_modal') {
             const token = interaction.fields.getTextInputValue('adv_token').trim().replace(/^["'](.+)["']$/, '$1');
             const channelsRaw = interaction.fields.getTextInputValue('adv_channels');
             const messageContent = interaction.fields.getTextInputValue('adv_message');
@@ -483,34 +523,21 @@ controlBot.on('interactionCreate', async interaction => {
                 return interaction.reply({ content: '❌ No valid channel IDs provided.', ephemeral: true });
             }
 
-            const assignedProxy = pool.shift();
-            saveProxyPool(pool); 
-
-            await interaction.deferReply({ ephemeral: true });
-
-            advState.targetChannels = channels;
-            advState.messageContent = messageContent;
-            advState.minDelay = min;
-            advState.maxDelay = max;
-            advState.userToken = token;
-            advState.currentProxy = assignedProxy;
-
+            // Save configuration so users don't have to fill it every time
             saveCampaignConfig({
-                isRunning: true,
+                isRunning: advState.isRunning,
                 targetChannels: channels,
                 messageContent: messageContent,
                 minDelay: min,
                 maxDelay: max,
                 userToken: token,
-                currentProxy: assignedProxy,
-                sentCount: 0,
-                failCount: 0
+                sentCount: advState.sentCount,
+                failCount: advState.failCount
             });
 
-            initializeAndRunSelfbot(token, assignedProxy, false);
-
-            await interaction.editReply({ 
-                content: `🚀 **Campaign Initialized Safely!**\nTargeting **${channels.length} channel(s)**.` 
+            await interaction.reply({ 
+                content: `✅ **Configuration Saved Successfully!**\nYou can now click **Start Advertising** to launch your campaign with these settings.`, 
+                ephemeral: true 
             });
         }
     } catch (error) {
@@ -544,8 +571,9 @@ function stopAutomation() {
     advState.userToken = null;
     advState.currentProxy = null;
 
-    if (fs.existsSync(CONFIG_FILE)) {
-        try { fs.unlinkSync(CONFIG_FILE); } catch {}
+    const savedCfg = loadCampaignConfig();
+    if (savedCfg) {
+        saveCampaignConfig({ ...savedCfg, isRunning: false, currentProxy: null });
     }
 }
 
