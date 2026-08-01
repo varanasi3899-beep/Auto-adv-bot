@@ -177,12 +177,8 @@ controlBot.once('ready', async () => {
     }
 });
 
-function initializeAndRunSelfbot(token, proxyString, isResume = false) {
-    if (advState.activeClient) {
-        try { advState.activeClient.destroy(); } catch {}
-        advState.activeClient = null;
-    }
-
+// Helper function to validate token and channel IDs prior to running the main loop
+async function validateAndStartCampaign(token, proxyString, targetChannels, interaction) {
     let agentOptions = {};
     let formattedProxy = proxyString.trim();
     if (!formattedProxy.startsWith('http://') && !formattedProxy.startsWith('https://')) {
@@ -191,12 +187,11 @@ function initializeAndRunSelfbot(token, proxyString, isResume = false) {
     try {
         agentOptions.httpAgent = new HttpsProxyAgent(formattedProxy);
         agentOptions.ws = { agent: agentOptions.httpAgent };
-        console.log(`[Proxy Engine] Assigned unique proxy to user session.`);
     } catch (e) {
         console.error('[Proxy Error] Failed to parse proxy configuration:', e.message);
     }
 
-    const userClient = new SelfbotClient({ 
+    const testClient = new SelfbotClient({ 
         checkUpdate: false,
         restTimeOffset: 0,
         failIfNotExists: false,
@@ -217,86 +212,111 @@ function initializeAndRunSelfbot(token, proxyString, isResume = false) {
         }
     });
 
-    userClient.once('ready', async () => {
-        advState.isRunning = true;
-        advState.activeClient = userClient;
-        if (!isResume) {
-            advState.sentCount = 0;
-            advState.failCount = 0;
+    let timeoutReached = false;
+    const loginTimeout = setTimeout(() => {
+        timeoutReached = true;
+        try { testClient.destroy(); } catch {}
+    }, 15000);
+
+    try {
+        await testClient.login(token);
+        clearTimeout(loginTimeout);
+
+        if (timeoutReached || !testClient.user) {
+            return { success: false, error: '❌ **Invalid Token:** Failed to authenticate with the provided Discord user token. Please check your token and try again.' };
         }
 
-        console.log(`[Selfbot Engine] Successfully authenticated as ${userClient.user.tag} with dedicated proxy routing`);
-
-        await new Promise(resolve => setTimeout(resolve, 8000));
-
-        const initialDelaySecs = Math.floor(Math.random() * (advState.maxDelay - advState.minDelay + 1)) + advState.minDelay;
-
-        const runLoop = async () => {
-            if (!advState.isRunning || advState.activeClient !== userClient) return;
-
-            if (advState.sentCount >= 35) {
-                console.log('[Stability Cool-down] Pausing loop for 20 minutes to preserve socket health...');
-                await new Promise(resolve => setTimeout(resolve, 20 * 60 * 1000));
-                if (!advState.isRunning) return;
-                advState.sentCount = 0;
+        // Validate target channels
+        for (const channelId of targetChannels) {
+            const channel = await testClient.channels.fetch(channelId).catch(() => null);
+            if (!channel) {
+                try { testClient.destroy(); } catch {}
+                return { success: false, error: `❌ **Invalid Channel ID:** Could not access channel ID \`${channelId}\`. Make sure the token has access to this channel and the ID is correct.` };
             }
+        }
 
-            for (const channelId of advState.targetChannels) {
-                if (!advState.isRunning || advState.activeClient !== userClient) break;
-                
-                try {
-                    const channel = await userClient.channels.fetch(channelId).catch(() => null);
-                    if (!channel) {
-                        advState.failCount++;
-                        console.warn(`[Warning] Could not fetch channel ID: ${channelId}`);
-                        continue;
-                    }
+        // Validation passed, assign to active client
+        if (advState.activeClient) {
+            try { advState.activeClient.destroy(); } catch {}
+            advState.activeClient = null;
+        }
 
-                    const typingDuration = Math.min(Math.max(advState.messageContent.length * 110, 3500), 9000);
-                    await channel.sendTyping().catch(() => {});
-                    await new Promise(resolve => setTimeout(resolve, typingDuration));
+        advState.activeClient = testClient;
+        setupClientLoop(testClient);
+        return { success: true };
 
-                    const dynamicTokens = [' ', '  ', '\u200B', '\u200C', '\u200D', ' \u200B'];
-                    const randomVariant = dynamicTokens[Math.floor(Math.random() * dynamicTokens.length)];
-                    const finalPayload = advState.messageContent + randomVariant;
+    } catch (err) {
+        clearTimeout(loginTimeout);
+        try { testClient.destroy(); } catch {}
+        return { success: false, error: '❌ **Invalid Token:** Authentication failed. Please provide a valid Discord user token.' };
+    }
+}
 
-                    await channel.send(finalPayload);
-                    advState.sentCount++;
-                    
-                    // Update user-specific session info if configuration file exists
-                    // (Using ADMIN_USER_ID or whichever file matches currently active session if needed, 
-                    // but since config is per-user, we maintain global advState as primary controller)
-                } catch (err) {
+function setupClientLoop(userClient) {
+    advState.isRunning = true;
+    advState.sentCount = 0;
+    advState.failCount = 0;
+
+    console.log(`[Selfbot Engine] Successfully authenticated as ${userClient.user.tag} with dedicated proxy routing`);
+
+    const initialDelaySecs = Math.floor(Math.random() * (advState.maxDelay - advState.minDelay + 1)) + advState.minDelay;
+
+    const runLoop = async () => {
+        if (!advState.isRunning || advState.activeClient !== userClient) return;
+
+        if (advState.sentCount >= 35) {
+            console.log('[Stability Cool-down] Pausing loop for 20 minutes to preserve socket health...');
+            await new Promise(resolve => setTimeout(resolve, 20 * 60 * 1000));
+            if (!advState.isRunning) return;
+            advState.sentCount = 0;
+        }
+
+        for (const channelId of advState.targetChannels) {
+            if (!advState.isRunning || advState.activeClient !== userClient) break;
+            
+            try {
+                const channel = await userClient.channels.fetch(channelId).catch(() => null);
+                if (!channel) {
                     advState.failCount++;
-                    console.error(`[Execution Error] Channel ${channelId}:`, err.message);
-                    
-                    if (err.status === 429 || (err.message && err.message.toLowerCase().includes('rate limit'))) {
-                        console.warn('[Rate Limit Guard] Rate limit hit. Enforcing 60-second backoff...');
-                        await new Promise(resolve => setTimeout(resolve, 60000));
-                    }
+                    console.warn(`[Warning] Could not fetch channel ID: ${channelId}`);
+                    continue;
                 }
 
-                const channelBuffer = Math.floor(Math.random() * 6000) + 6000;
-                await new Promise(resolve => setTimeout(resolve, channelBuffer));
+                const typingDuration = Math.min(Math.max(advState.messageContent.length * 110, 3500), 9000);
+                await channel.sendTyping().catch(() => {});
+                await new Promise(resolve => setTimeout(resolve, typingDuration));
+
+                const dynamicTokens = [' ', '  ', '\u200B', '\u200C', '\u200D', ' \u200B'];
+                const randomVariant = dynamicTokens[Math.floor(Math.random() * dynamicTokens.length)];
+                const finalPayload = advState.messageContent + randomVariant;
+
+                await channel.send(finalPayload);
+                advState.sentCount++;
+            } catch (err) {
+                advState.failCount++;
+                console.error(`[Execution Error] Channel ${channelId}:`, err.message);
+                
+                if (err.status === 429 || (err.message && err.message.toLowerCase().includes('rate limit'))) {
+                    console.warn('[Rate Limit Guard] Rate limit hit. Enforcing 60-second backoff...');
+                    await new Promise(resolve => setTimeout(resolve, 60000));
+                }
             }
 
-            if (advState.isRunning && advState.activeClient === userClient) {
-                const randomDelaySecs = Math.floor(Math.random() * (advState.maxDelay - advState.minDelay + 1)) + advState.minDelay;
-                advState.timeoutId = setTimeout(runLoop, randomDelaySecs * 1000);
-            }
-        };
+            const channelBuffer = Math.floor(Math.random() * 6000) + 6000;
+            await new Promise(resolve => setTimeout(resolve, channelBuffer));
+        }
 
-        advState.timeoutId = setTimeout(runLoop, initialDelaySecs * 1000);
-    });
+        if (advState.isRunning && advState.activeClient === userClient) {
+            const randomDelaySecs = Math.floor(Math.random() * (advState.maxDelay - advState.minDelay + 1)) + advState.minDelay;
+            advState.timeoutId = setTimeout(runLoop, randomDelaySecs * 1000);
+        }
+    };
 
     userClient.on('error', (err) => {
         console.error('[Selfbot Gateway Error]:', err.message);
     });
 
-    userClient.login(token).catch((err) => {
-        console.error(`[Login Critical Error] Failed to authenticate user token: ${err.message}`);
-        stopAutomation();
-    });
+    advState.timeoutId = setTimeout(runLoop, initialDelaySecs * 1000);
 }
 
 controlBot.on('interactionCreate', async interaction => {
@@ -470,14 +490,20 @@ controlBot.on('interactionCreate', async interaction => {
 
                 await interaction.deferReply({ ephemeral: true });
 
+                const validationResult = await validateAndStartCampaign(savedCfg.userToken, assignedProxy, savedCfg.targetChannels, interaction);
+                if (!validationResult.success) {
+                    // Return proxy back to pool if validation failed
+                    pool.push(assignedProxy);
+                    saveProxyPool(pool);
+                    return interaction.editReply({ content: validationResult.error });
+                }
+
                 advState.targetChannels = savedCfg.targetChannels;
                 advState.messageContent = savedCfg.messageContent;
                 advState.minDelay = savedCfg.minDelay || 90;
                 advState.maxDelay = savedCfg.maxDelay || 180;
                 advState.userToken = savedCfg.userToken;
                 advState.currentProxy = assignedProxy;
-
-                initializeAndRunSelfbot(savedCfg.userToken, assignedProxy, false);
 
                 await interaction.editReply({ 
                     content: `🚀 **Campaign Started Successfully!**\nTargeting **${savedCfg.targetChannels.length} channel(s)**.` 
