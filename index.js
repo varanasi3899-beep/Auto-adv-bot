@@ -79,6 +79,20 @@ function savePersistentPanelUsers(usersList) {
     }
 }
 
+function addPersistentPanelUser(panelUserId) {
+    const list = getPersistentPanelUsers();
+    if (!list.includes(panelUserId)) {
+        list.push(panelUserId);
+        savePersistentPanelUsers(list);
+    }
+}
+
+function removePersistentPanelUser(panelUserId) {
+    let list = getPersistentPanelUsers();
+    list = list.filter(id => id !== panelUserId);
+    savePersistentPanelUsers(list);
+}
+
 function getUserConfigPath(userId) {
     return path.join(CONFIG_DIR, `config_${userId}.json`);
 }
@@ -184,6 +198,7 @@ controlBot.once('ready', async () => {
                 console.error(`Failed to DM panel user ${panelUserId}:`, err.message);
             }
         }
+        // Clear file after notifying so they aren't repeatedly spammed on subsequent routine checks
         savePersistentPanelUsers([]);
     }
 
@@ -327,12 +342,8 @@ async function validateAndStartCampaign(panelUserId, token, proxyString, targetC
 
         activeSessions.set(actualTokenUserId, session);
 
-        // Track persistent panel user for redeployment alerts
-        const currentPanelList = getPersistentPanelUsers();
-        if (!currentPanelList.includes(panelUserId)) {
-            currentPanelList.push(panelUserId);
-            savePersistentPanelUsers(currentPanelList);
-        }
+        // Immediately save the panel user to the persistent file
+        addPersistentPanelUser(panelUserId);
 
         return { success: true, session };
 
@@ -824,13 +835,7 @@ function stopAutomationForTokenUser(tokenUserId) {
     
     const panelUserId = session.panelUserId;
     activeSessions.delete(tokenUserId);
-
-    let currentPanelList = getPersistentPanelUsers();
-    const index = currentPanelList.indexOf(panelUserId);
-    if (index !== -1) {
-        currentPanelList.splice(index, 1);
-        savePersistentPanelUsers(currentPanelList);
-    }
+    removePersistentPanelUser(panelUserId);
 }
 
 controlBot.login(process.env.DISCORD_TOKEN);
