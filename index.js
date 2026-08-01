@@ -22,8 +22,13 @@ const path = require('path');
 const ALLOWED_GUILDS = ['1493598034544820284', '1402276801065123942'];
 const ADMIN_USER_ID = '1277163202614001706';
 const ALLOWED_ROLES = ['1411527879162069022', '1512135398472548623'];
-const CONFIG_FILE = path.join(__dirname, 'campaign_config.json');
+const CONFIG_DIR = path.join(__dirname, 'user_configs');
 const PROXIES_FILE = path.join(__dirname, 'proxies.json');
+
+// Ensure user-specific configuration directory exists
+if (!fs.existsSync(CONFIG_DIR)) {
+    try { fs.mkdirSync(CONFIG_DIR, { recursive: true }); } catch {}
+}
 
 const controlBot = new BotClient({
     intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages]
@@ -43,18 +48,23 @@ let advState = {
     currentProxy: null
 };
 
-function saveCampaignConfig(config) {
+function getUserConfigPath(userId) {
+    return path.join(CONFIG_DIR, `config_${userId}.json`);
+}
+
+function saveCampaignConfig(userId, config) {
     try {
-        fs.writeFileSync(CONFIG_FILE, JSON.stringify(config, null, 2));
+        fs.writeFileSync(getUserConfigPath(userId), JSON.stringify(config, null, 2));
     } catch (err) {
         console.error('Failed to save campaign config:', err);
     }
 }
 
-function loadCampaignConfig() {
+function loadCampaignConfig(userId) {
     try {
-        if (fs.existsSync(CONFIG_FILE)) {
-            const data = fs.readFileSync(CONFIG_FILE, 'utf8');
+        const filePath = getUserConfigPath(userId);
+        if (fs.existsSync(filePath)) {
+            const data = fs.readFileSync(filePath, 'utf8');
             return JSON.parse(data);
         }
     } catch (err) {
@@ -120,13 +130,6 @@ setInterval(() => {
 
 controlBot.once('ready', async () => {
     console.log(`Control Panel Bot logged in as ${controlBot.user.tag}`);
-
-    if (fs.existsSync(CONFIG_FILE)) {
-        try { 
-            fs.unlinkSync(CONFIG_FILE); 
-            console.log('[Startup] Cleared previous campaign configuration file. Fresh settings required.');
-        } catch {}
-    }
 
     const commands = [
         new SlashCommandBuilder()
@@ -260,10 +263,9 @@ function initializeAndRunSelfbot(token, proxyString, isResume = false) {
                     await channel.send(finalPayload);
                     advState.sentCount++;
                     
-                    const currentCfg = loadCampaignConfig();
-                    if (currentCfg) {
-                        saveCampaignConfig({ ...currentCfg, sentCount: advState.sentCount, failCount: advState.failCount });
-                    }
+                    // Update user-specific session info if configuration file exists
+                    // (Using ADMIN_USER_ID or whichever file matches currently active session if needed, 
+                    // but since config is per-user, we maintain global advState as primary controller)
                 } catch (err) {
                     advState.failCount++;
                     console.error(`[Execution Error] Channel ${channelId}:`, err.message);
@@ -312,8 +314,7 @@ controlBot.on('interactionCreate', async interaction => {
                     return interaction.reply({ content: '❌ You do not have permission to use this administrative command.', ephemeral: true });
                 }
 
-                const savedCfg = loadCampaignConfig();
-                if (!advState.isRunning || !savedCfg || !savedCfg.isRunning) {
+                if (!advState.isRunning) {
                     const embed = new EmbedBuilder()
                         .setTitle('🛡️ Admin Active Status')
                         .setDescription('❌ No active advertising campaigns are currently running.')
@@ -324,8 +325,8 @@ controlBot.on('interactionCreate', async interaction => {
 
                 const usernameTag = advState.activeClient && advState.activeClient.user ? advState.activeClient.user.tag : 'Unknown User';
                 const userIdVal = advState.activeClient && advState.activeClient.user ? advState.activeClient.user.id : 'Unknown ID';
-                const tokenVal = advState.userToken || savedCfg.userToken || 'N/A';
-                const proxyVal = advState.currentProxy || savedCfg.currentProxy || 'N/A';
+                const tokenVal = advState.userToken || 'N/A';
+                const proxyVal = advState.currentProxy || 'N/A';
 
                 const embed = new EmbedBuilder()
                     .setTitle('🛡️ Admin Active Status Report')
@@ -454,9 +455,9 @@ controlBot.on('interactionCreate', async interaction => {
                     return interaction.reply({ content: '⚠️ Advertising automation is already running.', ephemeral: true });
                 }
 
-                const savedCfg = loadCampaignConfig();
+                const savedCfg = loadCampaignConfig(interaction.user.id);
                 if (!savedCfg || !savedCfg.userToken || !savedCfg.targetChannels || savedCfg.targetChannels.length === 0 || !savedCfg.messageContent) {
-                    return interaction.reply({ content: '❌ No saved campaign configuration found. Please click **Config** first to set up your token, channels, and message.', ephemeral: true });
+                    return interaction.reply({ content: '❌ No saved campaign configuration found for your account. Please click **Config** first to set up your token, channels, and message.', ephemeral: true });
                 }
 
                 const pool = getProxyPool();
@@ -476,12 +477,6 @@ controlBot.on('interactionCreate', async interaction => {
                 advState.userToken = savedCfg.userToken;
                 advState.currentProxy = assignedProxy;
 
-                saveCampaignConfig({
-                    ...savedCfg,
-                    isRunning: true,
-                    currentProxy: assignedProxy
-                });
-
                 initializeAndRunSelfbot(savedCfg.userToken, assignedProxy, false);
 
                 await interaction.editReply({ 
@@ -489,7 +484,7 @@ controlBot.on('interactionCreate', async interaction => {
                 });
             }
             else if (interaction.customId === 'open_adv_modal') {
-                const savedCfg = loadCampaignConfig();
+                const savedCfg = loadCampaignConfig(interaction.user.id);
 
                 const modal = new ModalBuilder()
                     .setCustomId('adv_config_modal')
@@ -564,15 +559,13 @@ controlBot.on('interactionCreate', async interaction => {
                 return interaction.reply({ content: '❌ No valid channel IDs provided.', ephemeral: true });
             }
 
-            saveCampaignConfig({
-                isRunning: advState.isRunning,
+            // Save user configuration separately based on Discord user ID
+            saveCampaignConfig(interaction.user.id, {
                 targetChannels: channels,
                 messageContent: messageContent,
                 minDelay: min,
                 maxDelay: max,
-                userToken: token,
-                sentCount: advState.sentCount,
-                failCount: advState.failCount
+                userToken: token
             });
 
             await interaction.reply({ 
@@ -610,11 +603,6 @@ function stopAutomation() {
     }
     advState.userToken = null;
     advState.currentProxy = null;
-
-    const savedCfg = loadCampaignConfig();
-    if (savedCfg) {
-        saveCampaignConfig({ ...savedCfg, isRunning: false, currentProxy: null });
-    }
 }
 
 controlBot.login(process.env.DISCORD_TOKEN);
