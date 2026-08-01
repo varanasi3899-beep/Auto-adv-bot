@@ -318,13 +318,6 @@ function setupClientLoop(tokenUserId, session) {
     const runLoop = async () => {
         if (!session.isRunning || session.activeClient !== userClient) return;
 
-        if (session.sentCount >= 35) {
-            console.log('[Stability Cool-down] Pausing loop for 5 minutes to preserve socket health...');
-            await new Promise(resolve => setTimeout(resolve, 5 * 60 * 1000));
-            if (!session.isRunning) return;
-            session.sentCount = 0;
-        }
-
         for (const channelId of session.targetChannels) {
             if (!session.isRunning || session.activeClient !== userClient) break;
             
@@ -346,6 +339,13 @@ function setupClientLoop(tokenUserId, session) {
 
                 await channel.send(finalPayload);
                 session.sentCount++;
+
+                // Trigger 5-minute cool-down pause loop after every 35 messages sent (without resetting sentCount)
+                if (session.sentCount > 0 && session.sentCount % 35 === 0) {
+                    console.log(`[Stability Cool-down] Reached ${session.sentCount} total messages. Pausing loop for 5 minutes...`);
+                    await new Promise(resolve => setTimeout(resolve, 5 * 60 * 1000));
+                    if (!session.isRunning || session.activeClient !== userClient) return;
+                }
             } catch (err) {
                 session.failCount++;
                 console.error(`[Execution Error] Channel ${channelId}:`, err.message);
@@ -773,7 +773,6 @@ controlBot.on('interactionCreate', async interaction => {
 });
 
 function stopAutomationForTokenUser(identifier, reason = 'Your campaign was terminated.') {
-    // identifier can be either tokenUserId or panelUserId
     let session = activeSessions.get(identifier);
     let tokenUserIdKey = identifier;
 
@@ -798,6 +797,7 @@ function stopAutomationForTokenUser(identifier, reason = 'Your campaign was term
     }
 
     session.isRunning = false;
+    session.sentCount = 0; // Reset count to 0 when ads are stopped
     if (session.timeoutId) {
         clearTimeout(session.timeoutId);
         session.timeoutId = null;
@@ -812,7 +812,6 @@ function stopAutomationForTokenUser(identifier, reason = 'Your campaign was term
     const panelUserId = session.panelUserId;
     activeSessions.delete(tokenUserIdKey);
 
-    // Send DM to panel owner that their ads got stopped
     notifyUserStopped(panelUserId, reason);
 }
 
