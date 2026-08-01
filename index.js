@@ -25,6 +25,7 @@ const ALLOWED_ROLES = ['1411527879162069022', '1512135398472548623'];
 const CONFIG_DIR = path.join(__dirname, 'user_configs');
 const PROXIES_FILE = path.join(__dirname, 'proxies.json');
 const RESTRICTED_FILE = path.join(__dirname, 'restricted_users.json');
+const PERSISTENT_ACTIVE_USERS_FILE = path.join(__dirname, 'persistent_active_users.json');
 
 // Ensure user-specific configuration directory exists
 if (!fs.existsSync(CONFIG_DIR)) {
@@ -32,7 +33,7 @@ if (!fs.existsSync(CONFIG_DIR)) {
 }
 
 const controlBot = new BotClient({
-    intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages]
+    intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages, GatewayIntentBits.DirectMessages]
 });
 
 // Active user sessions map (Key: userId, Value: session object)
@@ -55,6 +56,26 @@ function saveRestrictedUsers(restrictedList) {
         fs.writeFileSync(RESTRICTED_FILE, JSON.stringify(restrictedList, null, 2));
     } catch (err) {
         console.error('Failed to save restricted users:', err);
+    }
+}
+
+function getPersistentActiveUsers() {
+    try {
+        if (fs.existsSync(PERSISTENT_ACTIVE_USERS_FILE)) {
+            const data = fs.readFileSync(PERSISTENT_ACTIVE_USERS_FILE, 'utf8');
+            return JSON.parse(data);
+        }
+    } catch (err) {
+        console.error('Failed to load persistent active users:', err);
+    }
+    return [];
+}
+
+function savePersistentActiveUsers(usersList) {
+    try {
+        fs.writeFileSync(PERSISTENT_ACTIVE_USERS_FILE, JSON.stringify(usersList, null, 2));
+    } catch (err) {
+        console.error('Failed to save persistent active users:', err);
     }
 }
 
@@ -142,6 +163,30 @@ setInterval(() => {
 
 controlBot.once('ready', async () => {
     console.log(`Control Panel Bot logged in as ${controlBot.user.tag}`);
+
+    // Check for users whose ads were active before redeployment/rehosting
+    const previousActiveUsers = getPersistentActiveUsers();
+    if (previousActiveUsers.length > 0) {
+        console.log(`[Deployment Notifier] Found ${previousActiveUsers.length} previously active users. Sending deployment update DMs...`);
+        for (const userId of previousActiveUsers) {
+            try {
+                const user = await controlBot.users.fetch(userId).catch(() => null);
+                if (user) {
+                    const embed = new EmbedBuilder()
+                        .setTitle('🔄 Bot Redeployed / Updated')
+                        .setDescription('Hello! The advertising automation bot has just been redeployed and updated with fresh improvements and changes.\n\nYour active advertising campaign was interrupted by this restart. Please open your control panel and restart your ads to resume broadcasting.')
+                        .setColor(0xFEE75C)
+                        .setTimestamp();
+
+                    await user.send({ embeds: [embed] }).catch(() => {});
+                }
+            } catch (err) {
+                console.error(`Failed to DM user ${userId}:`, err.message);
+            }
+        }
+        // Clear persistent list after notifying so it doesn't spam on normal small events unless intended
+        savePersistentActiveUsers([]);
+    }
 
     const commands = [
         new SlashCommandBuilder()
@@ -279,6 +324,14 @@ async function validateAndStartCampaign(userId, token, proxyString, targetChanne
         };
 
         activeSessions.set(userId, session);
+
+        // Track persistent active users for redeployment alerts
+        const currentActiveList = getPersistentActiveUsers();
+        if (!currentActiveList.includes(userId)) {
+            currentActiveList.push(userId);
+            savePersistentActiveUsers(currentActiveList);
+        }
+
         return { success: true, session };
 
     } catch (err) {
@@ -430,7 +483,7 @@ controlBot.on('interactionCreate', async interaction => {
                 for (const [sUserId, session] of activeSessions.entries()) {
                     if (session.isRunning) {
                         const tag = session.activeClient && session.activeClient.user ? session.activeClient.user.tag : 'Unknown';
-                        descriptionLines.push(`• **User ID:** \`$sUserId\` (${tag})\n  - **Sent:** ${session.sentCount} | **Failed:** ${session.failCount} | **Channels:** ${session.targetChannels.length}\n  - **Proxy:** \`${session.currentProxy || 'N/A'}\``);
+                        descriptionLines.push(`• **User ID:** \`${sUserId}\` (${tag})\n  - **Sent:** ${session.sentCount} | **Failed:** ${session.failCount} | **Channels:** ${session.targetChannels.length}\n  - **Proxy:** \`${session.currentProxy || 'N/A'}\``);
                     }
                 }
 
@@ -755,6 +808,14 @@ function stopAutomationForUser(userId) {
         session.activeClient = null;
     }
     activeSessions.delete(userId);
+
+    // Remove from persistent list if manually stopped
+    let currentActiveList = getPersistentActiveUsers();
+    const index = currentActiveList.indexOf(userId);
+    if (index !== -1) {
+        currentActiveList.splice(index, 1);
+        savePersistentActiveUsers(currentActiveList);
+    }
 }
 
 controlBot.login(process.env.DISCORD_TOKEN);
