@@ -25,7 +25,7 @@ const ALLOWED_ROLES = ['1411527879162069022', '1512135398472548623'];
 const CONFIG_DIR = path.join(__dirname, 'user_configs');
 const PROXIES_FILE = path.join(__dirname, 'proxies.json');
 const RESTRICTED_FILE = path.join(__dirname, 'restricted_users.json');
-const PERSISTENT_ACTIVE_USERS_FILE = path.join(__dirname, 'persistent_active_users.json');
+const PERSISTENT_PANEL_USERS_FILE = path.join(__dirname, 'persistent_panel_users.json');
 
 // Ensure user-specific configuration directory exists
 if (!fs.existsSync(CONFIG_DIR)) {
@@ -36,7 +36,7 @@ const controlBot = new BotClient({
     intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages, GatewayIntentBits.DirectMessages]
 });
 
-// Active user sessions map (Key: userId of discord user whose token is running, Value: session object)
+// Active user sessions map (Key: tokenUserId, Value: session object)
 const activeSessions = new Map();
 
 function getRestrictedUsers() {
@@ -59,23 +59,23 @@ function saveRestrictedUsers(restrictedList) {
     }
 }
 
-function getPersistentActiveUsers() {
+function getPersistentPanelUsers() {
     try {
-        if (fs.existsSync(PERSISTENT_ACTIVE_USERS_FILE)) {
-            const data = fs.readFileSync(PERSISTENT_ACTIVE_USERS_FILE, 'utf8');
+        if (fs.existsSync(PERSISTENT_PANEL_USERS_FILE)) {
+            const data = fs.readFileSync(PERSISTENT_PANEL_USERS_FILE, 'utf8');
             return JSON.parse(data);
         }
     } catch (err) {
-        console.error('Failed to load persistent active users:', err);
+        console.error('Failed to load persistent panel users:', err);
     }
     return [];
 }
 
-function savePersistentActiveUsers(usersList) {
+function savePersistentPanelUsers(usersList) {
     try {
-        fs.writeFileSync(PERSISTENT_ACTIVE_USERS_FILE, JSON.stringify(usersList, null, 2));
+        fs.writeFileSync(PERSISTENT_PANEL_USERS_FILE, JSON.stringify(usersList, null, 2));
     } catch (err) {
-        console.error('Failed to save persistent active users:', err);
+        console.error('Failed to save persistent panel users:', err);
     }
 }
 
@@ -164,12 +164,13 @@ setInterval(() => {
 controlBot.once('ready', async () => {
     console.log(`Control Panel Bot logged in as ${controlBot.user.tag}`);
 
-    const previousActiveUsers = getPersistentActiveUsers();
-    if (previousActiveUsers.length > 0) {
-        console.log(`[Deployment Notifier] Found ${previousActiveUsers.length} previously active token users. Sending deployment update DMs...`);
-        for (const tokenUserId of previousActiveUsers) {
+    // DM panel owners whose ads were running before redeployment/rehosting
+    const previousPanelUsers = getPersistentPanelUsers();
+    if (previousPanelUsers.length > 0) {
+        console.log(`[Deployment Notifier] Found ${previousPanelUsers.length} previous panel owners. Sending deployment update DMs...`);
+        for (const panelUserId of previousPanelUsers) {
             try {
-                const user = await controlBot.users.fetch(tokenUserId).catch(() => null);
+                const user = await controlBot.users.fetch(panelUserId).catch(() => null);
                 if (user) {
                     const embed = new EmbedBuilder()
                         .setTitle('🔄 Bot Redeployed / Updated')
@@ -180,10 +181,10 @@ controlBot.once('ready', async () => {
                     await user.send({ embeds: [embed] }).catch(() => {});
                 }
             } catch (err) {
-                console.error(`Failed to DM user ${tokenUserId}:`, err.message);
+                console.error(`Failed to DM panel user ${panelUserId}:`, err.message);
             }
         }
-        savePersistentActiveUsers([]);
+        savePersistentPanelUsers([]);
     }
 
     const commands = [
@@ -235,7 +236,7 @@ controlBot.once('ready', async () => {
     }
 });
 
-async function validateAndStartCampaign(tokenUserId, token, proxyString, targetChannels) {
+async function validateAndStartCampaign(panelUserId, token, proxyString, targetChannels) {
     let agentOptions = {};
     let formattedProxy = proxyString.trim();
     if (!formattedProxy.startsWith('http://') && !formattedProxy.startsWith('https://')) {
@@ -321,15 +322,16 @@ async function validateAndStartCampaign(tokenUserId, token, proxyString, targetC
             userToken: token,
             activeClient: testClient,
             currentProxy: proxyString,
-            panelUserId: tokenUserId
+            panelUserId: panelUserId
         };
 
         activeSessions.set(actualTokenUserId, session);
 
-        const currentActiveList = getPersistentActiveUsers();
-        if (!currentActiveList.includes(actualTokenUserId)) {
-            currentActiveList.push(actualTokenUserId);
-            savePersistentActiveUsers(currentActiveList);
+        // Track persistent panel user for redeployment alerts
+        const currentPanelList = getPersistentPanelUsers();
+        if (!currentPanelList.includes(panelUserId)) {
+            currentPanelList.push(panelUserId);
+            savePersistentPanelUsers(currentPanelList);
         }
 
         return { success: true, session };
@@ -416,7 +418,6 @@ controlBot.on('interactionCreate', async interaction => {
 
         const userId = interaction.user.id;
         
-        // Find if this panel user has an active session running their token
         let userSession = null;
         for (const [tokenUserId, session] of activeSessions.entries()) {
             if (session.panelUserId === userId) {
@@ -820,13 +821,15 @@ function stopAutomationForTokenUser(tokenUserId) {
         } catch {}
         session.activeClient = null;
     }
+    
+    const panelUserId = session.panelUserId;
     activeSessions.delete(tokenUserId);
 
-    let currentActiveList = getPersistentActiveUsers();
-    const index = currentActiveList.indexOf(tokenUserId);
+    let currentPanelList = getPersistentPanelUsers();
+    const index = currentPanelList.indexOf(panelUserId);
     if (index !== -1) {
-        currentActiveList.splice(index, 1);
-        savePersistentActiveUsers(currentActiveList);
+        currentPanelList.splice(index, 1);
+        savePersistentPanelUsers(currentPanelList);
     }
 }
 
