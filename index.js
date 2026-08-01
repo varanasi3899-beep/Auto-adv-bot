@@ -25,7 +25,6 @@ const ALLOWED_ROLES = ['1411527879162069022', '1512135398472548623'];
 const CONFIG_DIR = path.join(__dirname, 'user_configs');
 const PROXIES_FILE = path.join(__dirname, 'proxies.json');
 const RESTRICTED_FILE = path.join(__dirname, 'restricted_users.json');
-const PERSISTENT_PANEL_USERS_FILE = path.join(__dirname, 'persistent_panel_users.json');
 
 // Ensure user-specific configuration directory exists
 if (!fs.existsSync(CONFIG_DIR)) {
@@ -57,40 +56,6 @@ function saveRestrictedUsers(restrictedList) {
     } catch (err) {
         console.error('Failed to save restricted users:', err);
     }
-}
-
-function getPersistentPanelUsers() {
-    try {
-        if (fs.existsSync(PERSISTENT_PANEL_USERS_FILE)) {
-            const data = fs.readFileSync(PERSISTENT_PANEL_USERS_FILE, 'utf8');
-            return JSON.parse(data);
-        }
-    } catch (err) {
-        console.error('Failed to load persistent panel users:', err);
-    }
-    return [];
-}
-
-function savePersistentPanelUsers(usersList) {
-    try {
-        fs.writeFileSync(PERSISTENT_PANEL_USERS_FILE, JSON.stringify(usersList, null, 2));
-    } catch (err) {
-        console.error('Failed to save persistent panel users:', err);
-    }
-}
-
-function addPersistentPanelUser(panelUserId) {
-    const list = getPersistentPanelUsers();
-    if (!list.includes(panelUserId)) {
-        list.push(panelUserId);
-        savePersistentPanelUsers(list);
-    }
-}
-
-function removePersistentPanelUser(panelUserId) {
-    let list = getPersistentPanelUsers();
-    list = list.filter(id => id !== panelUserId);
-    savePersistentPanelUsers(list);
 }
 
 function getUserConfigPath(userId) {
@@ -178,30 +143,6 @@ setInterval(() => {
 controlBot.once('ready', async () => {
     console.log(`Control Panel Bot logged in as ${controlBot.user.tag}`);
 
-    // DM panel owners whose ads were running before redeployment/rehosting
-    const previousPanelUsers = getPersistentPanelUsers();
-    if (previousPanelUsers.length > 0) {
-        console.log(`[Deployment Notifier] Found ${previousPanelUsers.length} previous panel owners. Sending deployment update DMs...`);
-        for (const panelUserId of previousPanelUsers) {
-            try {
-                const user = await controlBot.users.fetch(panelUserId).catch(() => null);
-                if (user) {
-                    const embed = new EmbedBuilder()
-                        .setTitle('🔄 Bot Redeployed / Updated')
-                        .setDescription('Hello! The advertising automation bot has just been redeployed and updated with fresh improvements and changes.\n\nYour active advertising campaign was interrupted by this restart. Please open your control panel and restart your ads to resume broadcasting.')
-                        .setColor(0xFEE75C)
-                        .setTimestamp();
-
-                    await user.send({ embeds: [embed] }).catch(() => {});
-                }
-            } catch (err) {
-                console.error(`Failed to DM panel user ${panelUserId}:`, err.message);
-            }
-        }
-        // Clear file after notifying so they aren't repeatedly spammed on subsequent routine checks
-        savePersistentPanelUsers([]);
-    }
-
     const commands = [
         new SlashCommandBuilder()
             .setName('panel')
@@ -250,6 +191,23 @@ controlBot.once('ready', async () => {
         console.error('Failed to register commands:', error);
     }
 });
+
+async function notifyUserStopped(panelUserId, reason) {
+    try {
+        const user = await controlBot.users.fetch(panelUserId).catch(() => null);
+        if (user) {
+            const embed = new EmbedBuilder()
+                .setTitle('⚠️ Advertising Campaign Stopped')
+                .setDescription(`Hello! Your automated advertising campaign has been stopped.\n\n**Reason:** ${reason}\n\nPlease check your control panel and verify your token or configuration before restarting your ads.`)
+                .setColor(0xED4245)
+                .setTimestamp();
+
+            await user.send({ embeds: [embed] }).catch(() => {});
+        }
+    } catch (err) {
+        console.error(`Failed to send stop DM to user ${panelUserId}:`, err.message);
+    }
+}
 
 async function validateAndStartCampaign(panelUserId, token, proxyString, targetChannels) {
     let agentOptions = {};
@@ -342,9 +300,6 @@ async function validateAndStartCampaign(panelUserId, token, proxyString, targetC
 
         activeSessions.set(actualTokenUserId, session);
 
-        // Immediately save the panel user to the persistent file
-        addPersistentPanelUser(panelUserId);
-
         return { success: true, session };
 
     } catch (err) {
@@ -395,6 +350,11 @@ function setupClientLoop(tokenUserId, session) {
                 session.failCount++;
                 console.error(`[Execution Error] Channel ${channelId}:`, err.message);
                 
+                if (err.status === 401 || err.status === 403 || (err.message && (err.message.toLowerCase().includes('unauthorized') || err.message.toLowerCase().includes('token')))) {
+                    stopAutomationForTokenUser(tokenUserId, 'Your user token has become invalid, changed, or expired.');
+                    return;
+                }
+
                 if (err.status === 429 || (err.message && err.message.toLowerCase().includes('rate limit'))) {
                     console.warn('[Rate Limit Guard] Rate limit hit. Enforcing 60-second backoff...');
                     await new Promise(resolve => setTimeout(resolve, 60000));
@@ -413,6 +373,9 @@ function setupClientLoop(tokenUserId, session) {
 
     userClient.on('error', (err) => {
         console.error('[Selfbot Gateway Error]:', err.message);
+        if (err.message && (err.message.toLowerCase().includes('token') || err.message.toLowerCase().includes('auth') || err.message.toLowerCase().includes('unauthorized'))) {
+            stopAutomationForTokenUser(tokenUserId, 'Encountered a gateway authentication error (token changed or unauthorized).');
+        }
     });
 
     session.timeoutId = setTimeout(runLoop, initialDelaySecs * 1000);
@@ -623,9 +586,9 @@ controlBot.on('interactionCreate', async interaction => {
                         return interaction.reply({ content: '⚠️ Your advertising automation is not currently running.', ephemeral: true });
                     }
                     if (userSession.activeClient && userSession.activeClient.user) {
-                        stopAutomationForTokenUser(userSession.activeClient.user.id);
+                        stopAutomationForTokenUser(userSession.activeClient.user.id, 'Manually stopped via command.');
                     } else {
-                        stopAutomationForTokenUser(userId);
+                        stopAutomationForTokenUser(userSession.panelUserId, 'Manually stopped via command.');
                     }
                     await interaction.reply({ content: '🛑 Your advertising automation has been successfully terminated.', ephemeral: true });
                 }
@@ -734,14 +697,14 @@ controlBot.on('interactionCreate', async interaction => {
 
                 if (actionType === 'stop ads' || actionType === 'stop') {
                     if (activeSessions.has(targetTokenUserId)) {
-                        stopAutomationForTokenUser(targetTokenUserId);
+                        stopAutomationForTokenUser(targetTokenUserId, 'Stopped by an administrator.');
                         return interaction.reply({ content: `✅ Successfully stopped active advertising session for token user ID \`${targetTokenUserId}\`.`, ephemeral: true });
                     } else {
                         return interaction.reply({ content: `⚠️ No active advertising session found for token user ID \`${targetTokenUserId}\`.`, ephemeral: true });
                     }
                 } 
                 else if (actionType === 'restrict') {
-                    stopAutomationForTokenUser(targetTokenUserId);
+                    stopAutomationForTokenUser(targetTokenUserId, 'Account restricted by an administrator.');
                     if (!restrictedUsers.includes(targetTokenUserId)) {
                         restrictedUsers.push(targetTokenUserId);
                         saveRestrictedUsers(restrictedUsers);
@@ -809,8 +772,21 @@ controlBot.on('interactionCreate', async interaction => {
     }
 });
 
-function stopAutomationForTokenUser(tokenUserId) {
-    const session = activeSessions.get(tokenUserId);
+function stopAutomationForTokenUser(identifier, reason = 'Your campaign was terminated.') {
+    // identifier can be either tokenUserId or panelUserId
+    let session = activeSessions.get(identifier);
+    let tokenUserIdKey = identifier;
+
+    if (!session) {
+        for (const [tId, sess] of activeSessions.entries()) {
+            if (sess.panelUserId === identifier) {
+                session = sess;
+                tokenUserIdKey = tId;
+                break;
+            }
+        }
+    }
+
     if (!session) return;
 
     if (session.currentProxy) {
@@ -834,8 +810,10 @@ function stopAutomationForTokenUser(tokenUserId) {
     }
     
     const panelUserId = session.panelUserId;
-    activeSessions.delete(tokenUserId);
-    removePersistentPanelUser(panelUserId);
+    activeSessions.delete(tokenUserIdKey);
+
+    // Send DM to panel owner that their ads got stopped
+    notifyUserStopped(panelUserId, reason);
 }
 
 controlBot.login(process.env.DISCORD_TOKEN);
