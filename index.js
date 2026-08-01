@@ -36,7 +36,7 @@ const controlBot = new BotClient({
     intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages, GatewayIntentBits.DirectMessages]
 });
 
-// Active user sessions map (Key: userId, Value: session object)
+// Active user sessions map (Key: userId of discord user whose token is running, Value: session object)
 const activeSessions = new Map();
 
 function getRestrictedUsers() {
@@ -152,7 +152,7 @@ setInterval(() => {
     const memoryUsageMB = process.memoryUsage().rss / 1024 / 1024;
     if (memoryUsageMB >= 950) {
         console.log(`[Memory Guardian] RAM usage reached ${memoryUsageMB.toFixed(2)} MB. Restarting process safely...`);
-        for (const [userId, session] of activeSessions.entries()) {
+        for (const [tokenUserId, session] of activeSessions.entries()) {
             if (session.activeClient) {
                 try { session.activeClient.destroy(); } catch {}
             }
@@ -164,13 +164,12 @@ setInterval(() => {
 controlBot.once('ready', async () => {
     console.log(`Control Panel Bot logged in as ${controlBot.user.tag}`);
 
-    // Check for users whose ads were active before redeployment/rehosting
     const previousActiveUsers = getPersistentActiveUsers();
     if (previousActiveUsers.length > 0) {
-        console.log(`[Deployment Notifier] Found ${previousActiveUsers.length} previously active users. Sending deployment update DMs...`);
-        for (const userId of previousActiveUsers) {
+        console.log(`[Deployment Notifier] Found ${previousActiveUsers.length} previously active token users. Sending deployment update DMs...`);
+        for (const tokenUserId of previousActiveUsers) {
             try {
-                const user = await controlBot.users.fetch(userId).catch(() => null);
+                const user = await controlBot.users.fetch(tokenUserId).catch(() => null);
                 if (user) {
                     const embed = new EmbedBuilder()
                         .setTitle('🔄 Bot Redeployed / Updated')
@@ -181,10 +180,9 @@ controlBot.once('ready', async () => {
                     await user.send({ embeds: [embed] }).catch(() => {});
                 }
             } catch (err) {
-                console.error(`Failed to DM user ${userId}:`, err.message);
+                console.error(`Failed to DM user ${tokenUserId}:`, err.message);
             }
         }
-        // Clear persistent list after notifying so it doesn't spam on normal small events unless intended
         savePersistentActiveUsers([]);
     }
 
@@ -237,7 +235,7 @@ controlBot.once('ready', async () => {
     }
 });
 
-async function validateAndStartCampaign(userId, token, proxyString, targetChannels) {
+async function validateAndStartCampaign(tokenUserId, token, proxyString, targetChannels) {
     let agentOptions = {};
     let formattedProxy = proxyString.trim();
     if (!formattedProxy.startsWith('http://') && !formattedProxy.startsWith('https://')) {
@@ -285,6 +283,8 @@ async function validateAndStartCampaign(userId, token, proxyString, targetChanne
             return { success: false, error: '❌ **Invalid Token:** Failed to authenticate with the provided Discord user token. Please check your token and try again.' };
         }
 
+        const actualTokenUserId = testClient.user.id;
+
         // Validate target channels
         for (const channelId of targetChannels) {
             const channel = await testClient.channels.fetch(channelId).catch(() => null);
@@ -294,9 +294,9 @@ async function validateAndStartCampaign(userId, token, proxyString, targetChanne
             }
         }
 
-        // Clean up previous user session if exists
-        if (activeSessions.has(userId)) {
-            const existing = activeSessions.get(userId);
+        // Clean up previous token session if exists
+        if (activeSessions.has(actualTokenUserId)) {
+            const existing = activeSessions.get(actualTokenUserId);
             if (existing.activeClient) {
                 try { existing.activeClient.destroy(); } catch {}
             }
@@ -320,15 +320,15 @@ async function validateAndStartCampaign(userId, token, proxyString, targetChanne
             maxDelay: 180,
             userToken: token,
             activeClient: testClient,
-            currentProxy: proxyString
+            currentProxy: proxyString,
+            panelUserId: tokenUserId
         };
 
-        activeSessions.set(userId, session);
+        activeSessions.set(actualTokenUserId, session);
 
-        // Track persistent active users for redeployment alerts
         const currentActiveList = getPersistentActiveUsers();
-        if (!currentActiveList.includes(userId)) {
-            currentActiveList.push(userId);
+        if (!currentActiveList.includes(actualTokenUserId)) {
+            currentActiveList.push(actualTokenUserId);
             savePersistentActiveUsers(currentActiveList);
         }
 
@@ -341,7 +341,7 @@ async function validateAndStartCampaign(userId, token, proxyString, targetChanne
     }
 }
 
-function setupClientLoop(userId, session) {
+function setupClientLoop(tokenUserId, session) {
     const userClient = session.activeClient;
     console.log(`[Selfbot Engine] Successfully authenticated as ${userClient.user.tag} with dedicated proxy routing`);
 
@@ -415,19 +415,31 @@ controlBot.on('interactionCreate', async interaction => {
         }
 
         const userId = interaction.user.id;
-        const userSession = activeSessions.get(userId) || {
-            isRunning: false,
-            sentCount: 0,
-            failCount: 0,
-            timeoutId: null,
-            targetChannels: [],
-            messageContent: '',
-            minDelay: 90,
-            maxDelay: 180,
-            userToken: null,
-            activeClient: null,
-            currentProxy: null
-        };
+        
+        // Find if this panel user has an active session running their token
+        let userSession = null;
+        for (const [tokenUserId, session] of activeSessions.entries()) {
+            if (session.panelUserId === userId) {
+                userSession = session;
+                break;
+            }
+        }
+        if (!userSession) {
+            userSession = {
+                isRunning: false,
+                sentCount: 0,
+                failCount: 0,
+                timeoutId: null,
+                targetChannels: [],
+                messageContent: '',
+                minDelay: 90,
+                maxDelay: 180,
+                userToken: null,
+                activeClient: null,
+                currentProxy: null,
+                panelUserId: userId
+            };
+        }
 
         if (interaction.isChatInputCommand()) {
             if (interaction.commandName === 'admin-session-stop') {
@@ -441,9 +453,9 @@ controlBot.on('interactionCreate', async interaction => {
 
                 const targetUserInput = new TextInputBuilder()
                     .setCustomId('admin_target_user_id')
-                    .setLabel('Target User ID')
+                    .setLabel('Token User ID')
                     .setStyle(TextInputStyle.Short)
-                    .setPlaceholder('Enter Discord User ID...')
+                    .setPlaceholder('Enter Discord User ID of the token...')
                     .setRequired(true);
 
                 const actionInput = new TextInputBuilder()
@@ -468,7 +480,7 @@ controlBot.on('interactionCreate', async interaction => {
                 if (activeSessions.size === 0) {
                     const embed = new EmbedBuilder()
                         .setTitle('🛡️ Admin Active Status')
-                        .setDescription('❌ No active advertising sessions are currently running across any user.')
+                        .setDescription('❌ No active advertising sessions are currently running across any token.')
                         .setColor(0xED4245)
                         .setTimestamp();
                     return interaction.reply({ embeds: [embed], ephemeral: true });
@@ -480,10 +492,10 @@ controlBot.on('interactionCreate', async interaction => {
                     .setTimestamp();
 
                 let descriptionLines = [];
-                for (const [sUserId, session] of activeSessions.entries()) {
+                for (const [tokenUserId, session] of activeSessions.entries()) {
                     if (session.isRunning) {
                         const tag = session.activeClient && session.activeClient.user ? session.activeClient.user.tag : 'Unknown';
-                        descriptionLines.push(`• **User ID:** \`${sUserId}\` (${tag})\n  - **Sent:** ${session.sentCount} | **Failed:** ${session.failCount} | **Channels:** ${session.targetChannels.length}\n  - **Proxy:** \`${session.currentProxy || 'N/A'}\``);
+                        descriptionLines.push(`• **Token User ID:** \`${tokenUserId}\` (${tag})\n  - **Panel User ID:** \`${session.panelUserId}\`\n  - **Sent:** ${session.sentCount} | **Failed:** ${session.failCount} | **Channels:** ${session.targetChannels.length}\n  - **Proxy:** \`${session.currentProxy || 'N/A'}\``);
                     }
                 }
 
@@ -598,7 +610,11 @@ controlBot.on('interactionCreate', async interaction => {
                     if (!userSession.isRunning) {
                         return interaction.reply({ content: '⚠️ Your advertising automation is not currently running.', ephemeral: true });
                     }
-                    stopAutomationForUser(userId);
+                    if (userSession.activeClient && userSession.activeClient.user) {
+                        stopAutomationForTokenUser(userSession.activeClient.user.id);
+                    } else {
+                        stopAutomationForTokenUser(userId);
+                    }
                     await interaction.reply({ content: '🛑 Your advertising automation has been successfully terminated.', ephemeral: true });
                 }
             }
@@ -608,10 +624,6 @@ controlBot.on('interactionCreate', async interaction => {
                 const restrictedUsers = getRestrictedUsers();
                 if (restrictedUsers.includes(userId)) {
                     return interaction.reply({ content: '❌ **Access Denied:** Your account has been restricted from starting advertising campaigns by an administrator.', ephemeral: true });
-                }
-
-                if (userSession.isRunning) {
-                    return interaction.reply({ content: '⚠️ Your advertising automation is already running.', ephemeral: true });
                 }
 
                 const savedCfg = loadCampaignConfig(userId);
@@ -641,7 +653,8 @@ controlBot.on('interactionCreate', async interaction => {
                 session.minDelay = savedCfg.minDelay || 90;
                 session.maxDelay = savedCfg.maxDelay || 180;
 
-                setupClientLoop(userId, session);
+                const tokenUserId = session.activeClient.user.id;
+                setupClientLoop(tokenUserId, session);
 
                 await interaction.editReply({ 
                     content: `🚀 **Campaign Started Successfully!**\nTargeting **${savedCfg.targetChannels.length} channel(s)**.` 
@@ -702,34 +715,34 @@ controlBot.on('interactionCreate', async interaction => {
                     return interaction.reply({ content: '❌ Unauthorized.', ephemeral: true });
                 }
 
-                const targetUserId = interaction.fields.getTextInputValue('admin_target_user_id').trim();
+                const targetTokenUserId = interaction.fields.getTextInputValue('admin_target_user_id').trim();
                 const actionType = interaction.fields.getTextInputValue('admin_action_type').trim().toLowerCase();
 
                 let restrictedUsers = getRestrictedUsers();
 
                 if (actionType === 'stop ads' || actionType === 'stop') {
-                    if (activeSessions.has(targetUserId)) {
-                        stopAutomationForUser(targetUserId);
-                        return interaction.reply({ content: `✅ Successfully stopped active advertising session for user ID \`${targetUserId}\`.`, ephemeral: true });
+                    if (activeSessions.has(targetTokenUserId)) {
+                        stopAutomationForTokenUser(targetTokenUserId);
+                        return interaction.reply({ content: `✅ Successfully stopped active advertising session for token user ID \`${targetTokenUserId}\`.`, ephemeral: true });
                     } else {
-                        return interaction.reply({ content: `⚠️ No active advertising session found for user ID \`${targetUserId}\`.`, ephemeral: true });
+                        return interaction.reply({ content: `⚠️ No active advertising session found for token user ID \`${targetTokenUserId}\`.`, ephemeral: true });
                     }
                 } 
                 else if (actionType === 'restrict') {
-                    stopAutomationForUser(targetUserId);
-                    if (!restrictedUsers.includes(targetUserId)) {
-                        restrictedUsers.push(targetUserId);
+                    stopAutomationForTokenUser(targetTokenUserId);
+                    if (!restrictedUsers.includes(targetTokenUserId)) {
+                        restrictedUsers.push(targetTokenUserId);
                         saveRestrictedUsers(restrictedUsers);
                     }
-                    return interaction.reply({ content: `🚫 Successfully restricted user ID \`${targetUserId}\`. They can no longer start advertising campaigns until unrestricted.`, ephemeral: true });
+                    return interaction.reply({ content: `🚫 Successfully restricted token user ID \`${targetTokenUserId}\`. They can no longer start advertising campaigns until unrestricted.`, ephemeral: true });
                 } 
                 else if (actionType === 'unrestrict') {
-                    const index = restrictedUsers.indexOf(targetUserId);
+                    const index = restrictedUsers.indexOf(targetTokenUserId);
                     if (index !== -1) {
                         restrictedUsers.splice(index, 1);
                         saveRestrictedUsers(restrictedUsers);
                     }
-                    return interaction.reply({ content: `✅ Successfully unrestricted user ID \`${targetUserId}\`. They can now start advertising campaigns again.`, ephemeral: true });
+                    return interaction.reply({ content: `✅ Successfully unrestricted token user ID \`${targetTokenUserId}\`. They can now start advertising campaigns again.`, ephemeral: true });
                 } 
                 else {
                     return interaction.reply({ content: '❌ Invalid action specified. Please use `stop ads`, `restrict`, or `unrestrict`.', ephemeral: true });
@@ -784,8 +797,8 @@ controlBot.on('interactionCreate', async interaction => {
     }
 });
 
-function stopAutomationForUser(userId) {
-    const session = activeSessions.get(userId);
+function stopAutomationForTokenUser(tokenUserId) {
+    const session = activeSessions.get(tokenUserId);
     if (!session) return;
 
     if (session.currentProxy) {
@@ -807,11 +820,10 @@ function stopAutomationForUser(userId) {
         } catch {}
         session.activeClient = null;
     }
-    activeSessions.delete(userId);
+    activeSessions.delete(tokenUserId);
 
-    // Remove from persistent list if manually stopped
     let currentActiveList = getPersistentActiveUsers();
-    const index = currentActiveList.indexOf(userId);
+    const index = currentActiveList.indexOf(tokenUserId);
     if (index !== -1) {
         currentActiveList.splice(index, 1);
         savePersistentActiveUsers(currentActiveList);
