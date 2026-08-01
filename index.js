@@ -143,7 +143,7 @@ controlBot.once('ready', async () => {
             ),
         new SlashCommandBuilder()
             .setName('admin-active-status')
-            .setDescription('Shows currently running advertising sessions with tokens and proxies (Admin Only)'),
+            .setDescription('Shows currently running advertising sessions (Admin Only)'),
         new SlashCommandBuilder()
             .setName('admin_proxies')
             .setDescription('Manage the system proxy pool (Admin Only)')
