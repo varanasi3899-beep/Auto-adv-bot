@@ -24,6 +24,7 @@ const ADMIN_USER_ID = '1277163202614001706';
 const ALLOWED_ROLES = ['1411527879162069022', '1512135398472548623'];
 const CONFIG_DIR = path.join(__dirname, 'user_configs');
 const PROXIES_FILE = path.join(__dirname, 'proxies.json');
+const RESTRICTED_FILE = path.join(__dirname, 'restricted_users.json');
 
 // Ensure user-specific configuration directory exists
 if (!fs.existsSync(CONFIG_DIR)) {
@@ -36,6 +37,26 @@ const controlBot = new BotClient({
 
 // Active user sessions map (Key: userId, Value: session object)
 const activeSessions = new Map();
+
+function getRestrictedUsers() {
+    try {
+        if (fs.existsSync(RESTRICTED_FILE)) {
+            const data = fs.readFileSync(RESTRICTED_FILE, 'utf8');
+            return JSON.parse(data);
+        }
+    } catch (err) {
+        console.error('Failed to load restricted users:', err);
+    }
+    return [];
+}
+
+function saveRestrictedUsers(restrictedList) {
+    try {
+        fs.writeFileSync(RESTRICTED_FILE, JSON.stringify(restrictedList, null, 2));
+    } catch (err) {
+        console.error('Failed to save restricted users:', err);
+    }
+}
 
 function getUserConfigPath(userId) {
     return path.join(CONFIG_DIR, `config_${userId}.json`);
@@ -138,6 +159,9 @@ controlBot.once('ready', async () => {
         new SlashCommandBuilder()
             .setName('admin-active-status')
             .setDescription('Shows currently running advertising sessions (Admin Only)'),
+        new SlashCommandBuilder()
+            .setName('admin-session-stop')
+            .setDescription('Manage user advertising sessions and restrictions (Admin Only)'),
         new SlashCommandBuilder()
             .setName('admin_proxies')
             .setDescription('Manage the system proxy pool (Admin Only)')
@@ -274,8 +298,8 @@ function setupClientLoop(userId, session) {
         if (!session.isRunning || session.activeClient !== userClient) return;
 
         if (session.sentCount >= 35) {
-            console.log('[Stability Cool-down] Pausing loop for 20 minutes to preserve socket health...');
-            await new Promise(resolve => setTimeout(resolve, 20 * 60 * 1000));
+            console.log('[Stability Cool-down] Pausing loop for 5 minutes to preserve socket health...');
+            await new Promise(resolve => setTimeout(resolve, 5 * 60 * 1000));
             if (!session.isRunning) return;
             session.sentCount = 0;
         }
@@ -353,7 +377,37 @@ controlBot.on('interactionCreate', async interaction => {
         };
 
         if (interaction.isChatInputCommand()) {
-            if (interaction.commandName === 'admin-active-status') {
+            if (interaction.commandName === 'admin-session-stop') {
+                if (userId !== ADMIN_USER_ID) {
+                    return interaction.reply({ content: '❌ You do not have permission to use this administrative command.', ephemeral: true });
+                }
+
+                const modal = new ModalBuilder()
+                    .setCustomId('admin_session_modal')
+                    .setTitle('Admin Session & Restriction Manager');
+
+                const targetUserInput = new TextInputBuilder()
+                    .setCustomId('admin_target_user_id')
+                    .setLabel('Target User ID')
+                    .setStyle(TextInputStyle.Short)
+                    .setPlaceholder('Enter Discord User ID...')
+                    .setRequired(true);
+
+                const actionInput = new TextInputBuilder()
+                    .setCustomId('admin_action_type')
+                    .setLabel('Action (stop ads, restrict, unrestrict)')
+                    .setStyle(TextInputStyle.Short)
+                    .setPlaceholder('Type: stop ads, restrict, or unrestrict')
+                    .setRequired(true);
+
+                modal.addComponents(
+                    new ActionRowBuilder().addComponents(targetUserInput),
+                    new ActionRowBuilder().addComponents(actionInput)
+                );
+
+                return interaction.showModal(modal);
+            }
+            else if (interaction.commandName === 'admin-active-status') {
                 if (userId !== ADMIN_USER_ID) {
                     return interaction.reply({ content: '❌ You do not have permission to use this administrative command.', ephemeral: true });
                 }
@@ -376,7 +430,7 @@ controlBot.on('interactionCreate', async interaction => {
                 for (const [sUserId, session] of activeSessions.entries()) {
                     if (session.isRunning) {
                         const tag = session.activeClient && session.activeClient.user ? session.activeClient.user.tag : 'Unknown';
-                        descriptionLines.push(`• **User ID:** \`${sUserId}\` (${tag})\n  - **Sent:** ${session.sentCount} | **Failed:** ${session.failCount} | **Channels:** ${session.targetChannels.length}\n  - **Proxy:** \`${session.currentProxy || 'N/A'}\``);
+                        descriptionLines.push(`• **User ID:** \`$sUserId\` (${tag})\n  - **Sent:** ${session.sentCount} | **Failed:** ${session.failCount} | **Channels:** ${session.targetChannels.length}\n  - **Proxy:** \`${session.currentProxy || 'N/A'}\``);
                     }
                 }
 
@@ -498,6 +552,11 @@ controlBot.on('interactionCreate', async interaction => {
         }
         else if (interaction.isButton()) {
             if (interaction.customId === 'start_adv_direct') {
+                const restrictedUsers = getRestrictedUsers();
+                if (restrictedUsers.includes(userId)) {
+                    return interaction.reply({ content: '❌ **Access Denied:** Your account has been restricted from starting advertising campaigns by an administrator.', ephemeral: true });
+                }
+
                 if (userSession.isRunning) {
                     return interaction.reply({ content: '⚠️ Your advertising automation is already running.', ephemeral: true });
                 }
@@ -584,45 +643,85 @@ controlBot.on('interactionCreate', async interaction => {
                 await interaction.showModal(modal);
             }
         }
-        else if (interaction.isModalSubmit() && interaction.customId === 'adv_config_modal') {
-            const token = interaction.fields.getTextInputValue('adv_token').trim().replace(/^["'](.+)["']$/, '$1');
-            const channelsRaw = interaction.fields.getTextInputValue('adv_channels');
-            const messageContent = interaction.fields.getTextInputValue('adv_message');
-            const delayRaw = interaction.fields.getTextInputValue('adv_delay').trim();
-
-            let min = 90, max = 180;
-            if (delayRaw.includes('-')) {
-                const parts = delayRaw.split('-').map(p => parseInt(p.trim(), 10));
-                if (!isNaN(parts[0]) && !isNaN(parts[1])) {
-                    min = parts[0];
-                    max = parts[1];
+        else if (interaction.isModalSubmit()) {
+            if (interaction.customId === 'admin_session_modal') {
+                if (userId !== ADMIN_USER_ID) {
+                    return interaction.reply({ content: '❌ Unauthorized.', ephemeral: true });
                 }
-            } else {
-                const val = parseInt(delayRaw, 10);
-                if (!isNaN(val)) min = max = val;
+
+                const targetUserId = interaction.fields.getTextInputValue('admin_target_user_id').trim();
+                const actionType = interaction.fields.getTextInputValue('admin_action_type').trim().toLowerCase();
+
+                let restrictedUsers = getRestrictedUsers();
+
+                if (actionType === 'stop ads' || actionType === 'stop') {
+                    if (activeSessions.has(targetUserId)) {
+                        stopAutomationForUser(targetUserId);
+                        return interaction.reply({ content: `✅ Successfully stopped active advertising session for user ID \`${targetUserId}\`.`, ephemeral: true });
+                    } else {
+                        return interaction.reply({ content: `⚠️ No active advertising session found for user ID \`${targetUserId}\`.`, ephemeral: true });
+                    }
+                } 
+                else if (actionType === 'restrict') {
+                    stopAutomationForUser(targetUserId);
+                    if (!restrictedUsers.includes(targetUserId)) {
+                        restrictedUsers.push(targetUserId);
+                        saveRestrictedUsers(restrictedUsers);
+                    }
+                    return interaction.reply({ content: `🚫 Successfully restricted user ID \`${targetUserId}\`. They can no longer start advertising campaigns until unrestricted.`, ephemeral: true });
+                } 
+                else if (actionType === 'unrestrict') {
+                    const index = restrictedUsers.indexOf(targetUserId);
+                    if (index !== -1) {
+                        restrictedUsers.splice(index, 1);
+                        saveRestrictedUsers(restrictedUsers);
+                    }
+                    return interaction.reply({ content: `✅ Successfully unrestricted user ID \`${targetUserId}\`. They can now start advertising campaigns again.`, ephemeral: true });
+                } 
+                else {
+                    return interaction.reply({ content: '❌ Invalid action specified. Please use `stop ads`, `restrict`, or `unrestrict`.', ephemeral: true });
+                }
             }
+            else if (interaction.customId === 'adv_config_modal') {
+                const token = interaction.fields.getTextInputValue('adv_token').trim().replace(/^["'](.+)["']$/, '$1');
+                const channelsRaw = interaction.fields.getTextInputValue('adv_channels');
+                const messageContent = interaction.fields.getTextInputValue('adv_message');
+                const delayRaw = interaction.fields.getTextInputValue('adv_delay').trim();
 
-            if (min < 60 || max < min) {
-                return interaction.reply({ content: '❌ Minimum delay must be at least 60 seconds.', ephemeral: true });
+                let min = 90, max = 180;
+                if (delayRaw.includes('-')) {
+                    const parts = delayRaw.split('-').map(p => parseInt(p.trim(), 10));
+                    if (!isNaN(parts[0]) && !isNaN(parts[1])) {
+                        min = parts[0];
+                        max = parts[1];
+                    }
+                } else {
+                    const val = parseInt(delayRaw, 10);
+                    if (!isNaN(val)) min = max = val;
+                }
+
+                if (min < 60 || max < min) {
+                    return interaction.reply({ content: '❌ Minimum delay must be at least 60 seconds.', ephemeral: true });
+                }
+
+                const channels = channelsRaw.split(',').map(id => id.trim()).filter(id => id.length > 0);
+                if (channels.length === 0) {
+                    return interaction.reply({ content: '❌ No valid channel IDs provided.', ephemeral: true });
+                }
+
+                saveCampaignConfig(userId, {
+                    targetChannels: channels,
+                    messageContent: messageContent,
+                    minDelay: min,
+                    maxDelay: max,
+                    userToken: token
+                });
+
+                await interaction.reply({ 
+                    content: `✅ **Configuration Saved Successfully!**\nYou can now click **Start Advertising** to launch your campaign with these settings.`, 
+                    ephemeral: true 
+                });
             }
-
-            const channels = channelsRaw.split(',').map(id => id.trim()).filter(id => id.length > 0);
-            if (channels.length === 0) {
-                return interaction.reply({ content: '❌ No valid channel IDs provided.', ephemeral: true });
-            }
-
-            saveCampaignConfig(userId, {
-                targetChannels: channels,
-                messageContent: messageContent,
-                minDelay: min,
-                maxDelay: max,
-                userToken: token
-            });
-
-            await interaction.reply({ 
-                content: `✅ **Configuration Saved Successfully!**\nYou can now click **Start Advertising** to launch your campaign with these settings.`, 
-                ephemeral: true 
-            });
         }
     } catch (error) {
         console.error('Interaction error:', error);
