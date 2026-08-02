@@ -160,22 +160,23 @@ controlBot.once('ready', async () => {
             .setName('admin-active-status')
             .setDescription('Shows currently running advertising sessions (Admin Only)'),
         new SlashCommandBuilder()
-            .setName('admin-session-stop')
+            .setName('admin-session-command')
             .setDescription('Manage user advertising sessions and restrictions (Admin Only)')
             .addStringOption(option =>
                 option.setName('action')
                     .setDescription('Action to execute')
                     .setRequired(true)
                     .addChoices(
-                        { name: 'stop ads', value: 'stop ads' },
+                        { name: 'stop ads', value: 'stop_ads' },
+                        { name: 'stop ads all', value: 'stop_ads_all' },
                         { name: 'restrict', value: 'restrict' },
                         { name: 'unrestrict', value: 'unrestrict' },
-                        { name: 'restricted users', value: 'restricted users' }
+                        { name: 'restricted users', value: 'restricted_users' }
                     )
             )
             .addStringOption(option =>
-                option.setName('user_id')
-                    .setDescription('Discord User ID (Required for stop ads, restrict, unrestrict)')
+                option.setName('target_user_id')
+                    .setDescription('Token User ID or Panel User ID (Required for stop/restrict/unrestrict)')
                     .setRequired(false)
             ),
         new SlashCommandBuilder()
@@ -222,6 +223,23 @@ async function notifyUserStopped(panelUserId, reason) {
         }
     } catch (err) {
         console.error(`Failed to send stop DM to user ${panelUserId}:`, err.message);
+    }
+}
+
+async function notifyMaintenanceStopped(panelUserId) {
+    try {
+        const user = await controlBot.users.fetch(panelUserId).catch(() => null);
+        if (user) {
+            const embed = new EmbedBuilder()
+                .setTitle('🛠️ Bot Under Maintenance')
+                .setDescription(`Hello! Your automated advertising campaign has been forcibly stopped because **the bot has gone under maintenance**.\n\nYou can restart your ads once maintenance is complete and the bot is fixed.`)
+                .setColor(0xFEE75C)
+                .setTimestamp();
+
+            await user.send({ embeds: [embed] }).catch(() => {});
+        }
+    } catch (err) {
+        console.error(`Failed to send maintenance stop DM to user ${panelUserId}:`, err.message);
     }
 }
 
@@ -274,13 +292,6 @@ async function validateAndStartCampaign(panelUserId, token, proxyString, targetC
         }
 
         const actualTokenUserId = testClient.user.id;
-
-        // Check if token user ID is restricted
-        const restrictedUsers = getRestrictedUsers();
-        if (restrictedUsers.includes(actualTokenUserId)) {
-            try { testClient.destroy(); } catch {}
-            return { success: false, error: '❌ **Access Denied:** This token account has been restricted from running advertisements.' };
-        }
 
         // Validate target channels
         for (const channelId of targetChannels) {
@@ -440,55 +451,115 @@ controlBot.on('interactionCreate', async interaction => {
         }
 
         if (interaction.isChatInputCommand()) {
-            if (interaction.commandName === 'admin-session-stop') {
+            if (interaction.commandName === 'admin-session-command') {
                 if (userId !== ADMIN_USER_ID) {
                     return interaction.reply({ content: '❌ You do not have permission to use this administrative command.', ephemeral: true });
                 }
 
-                const actionType = interaction.options.getString('action');
-                const targetTokenUserId = interaction.options.getString('user_id');
+                const action = interaction.options.getString('action');
+                const targetUserInput = interaction.options.getString('target_user_id');
                 let restrictedUsers = getRestrictedUsers();
 
-                if (actionType === 'restricted users') {
-                    const listText = restrictedUsers.length > 0 ? restrictedUsers.map((id, index) => `\`${index + 1}.\` <@${id}> (\`${id}\`)`).join('\n') : 'No restricted users found.';
+                if (action === 'restricted_users') {
+                    const listText = restrictedUsers.length > 0 
+                        ? restrictedUsers.map((id, index) => `\`${index + 1}.\` <@${id}> (\`${id}\`)`).join('\n') 
+                        : 'No users are currently restricted.';
+                    
                     const embed = new EmbedBuilder()
-                        .setTitle('🚫 Restricted Users List')
+                        .setTitle('🛡️ Restricted Users List')
                         .setDescription(listText)
                         .setColor(0xED4245)
-                        .setFooter({ text: `Total Restricted Accounts: ${restrictedUsers.length}` })
+                        .setFooter({ text: `Total Restricted Users: ${restrictedUsers.length}` })
                         .setTimestamp();
                     return interaction.reply({ embeds: [embed], ephemeral: true });
                 }
 
-                if (!targetTokenUserId) {
-                    return interaction.reply({ content: '❌ You must specify a `user_id` for this action.', ephemeral: true });
+                if (action === 'stop_ads_all') {
+                    if (activeSessions.size === 0) {
+                        return interaction.reply({ content: '⚠️ There are no active advertising sessions currently running.', ephemeral: true });
+                    }
+
+                    const panelUserIdsToNotify = new Set();
+                    for (const [tokenUserId, session] of activeSessions.entries()) {
+                        if (session.panelUserId) {
+                            panelUserIdsToNotify.add(session.panelUserId);
+                        }
+                        // Stop and clean up session
+                        if (session.currentProxy) {
+                            const pool = getProxyPool();
+                            if (!pool.includes(session.currentProxy)) {
+                                pool.push(session.currentProxy);
+                                saveProxyPool(pool);
+                            }
+                        }
+                        session.isRunning = false;
+                        session.sentCount = 0;
+                        if (session.timeoutId) {
+                            clearTimeout(session.timeoutId);
+                            session.timeoutId = null;
+                        }
+                        if (session.activeClient) {
+                            try { session.activeClient.destroy(); } catch {}
+                            session.activeClient = null;
+                        }
+                    }
+
+                    activeSessions.clear();
+
+                    // Send maintenance DM to each affected panel owner
+                    for (const panelOwnerId of panelUserIdsToNotify) {
+                        await notifyMaintenanceStopped(panelOwnerId);
+                    }
+
+                    return interaction.reply({ content: `✅ Successfully terminated **all active sessions** and sent maintenance notification DMs to **${panelUserIdsToNotify.size}** panel owner(s).`, ephemeral: true });
                 }
 
-                const cleanedTargetId = targetTokenUserId.trim();
+                if (!targetUserInput) {
+                    return interaction.reply({ content: '❌ You must provide the `target_user_id` option for this action.', ephemeral: true });
+                }
 
-                if (actionType === 'stop ads' || actionType === 'stop') {
-                    if (activeSessions.has(cleanedTargetId)) {
-                        stopAutomationForTokenUser(cleanedTargetId, 'Stopped by an administrator.');
-                        return interaction.reply({ content: `✅ Successfully stopped active advertising session for token user ID \`${cleanedTargetId}\`.`, ephemeral: true });
+                const targetId = targetUserInput.trim();
+
+                if (action === 'stop_ads') {
+                    if (activeSessions.has(targetId)) {
+                        stopAutomationForTokenUser(targetId, 'Stopped by an administrator.');
+                        return interaction.reply({ content: `✅ Successfully stopped active advertising session for token user ID \`${targetId}\`.`, ephemeral: true });
                     } else {
-                        return interaction.reply({ content: `⚠️ No active advertising session found for token user ID \`${cleanedTargetId}\`.`, ephemeral: true });
+                        let foundByPanel = false;
+                        for (const [tId, sess] of activeSessions.entries()) {
+                            if (sess.panelUserId === targetId) {
+                                stopAutomationForTokenUser(tId, 'Stopped by an administrator.');
+                                foundByPanel = true;
+                                break;
+                            }
+                        }
+                        if (foundByPanel) {
+                            return interaction.reply({ content: `✅ Successfully stopped active advertising session for user ID \`${targetId}\`.`, ephemeral: true });
+                        }
+                        return interaction.reply({ content: `⚠️ No active advertising session found for user ID \`${targetId}\`.`, ephemeral: true });
                     }
                 } 
-                else if (actionType === 'restrict') {
-                    stopAutomationForTokenUser(cleanedTargetId, 'Account restricted by an administrator.');
-                    if (!restrictedUsers.includes(cleanedTargetId)) {
-                        restrictedUsers.push(cleanedTargetId);
+                else if (action === 'restrict') {
+                    stopAutomationForTokenUser(targetId, 'Account restricted by an administrator.');
+                    for (const [tId, sess] of activeSessions.entries()) {
+                        if (sess.panelUserId === targetId) {
+                            stopAutomationForTokenUser(tId, 'Account restricted by an administrator.');
+                        }
+                    }
+
+                    if (!restrictedUsers.includes(targetId)) {
+                        restrictedUsers.push(targetId);
                         saveRestrictedUsers(restrictedUsers);
                     }
-                    return interaction.reply({ content: `🚫 Successfully restricted token user ID \`${cleanedTargetId}\`. They can no longer start advertising campaigns until unrestricted.`, ephemeral: true });
+                    return interaction.reply({ content: `🚫 Successfully restricted user ID \`${targetId}\`. They can no longer start advertising campaigns until unrestricted.`, ephemeral: true });
                 } 
-                else if (actionType === 'unrestrict') {
-                    const index = restrictedUsers.indexOf(cleanedTargetId);
+                else if (action === 'unrestrict') {
+                    const index = restrictedUsers.indexOf(targetId);
                     if (index !== -1) {
                         restrictedUsers.splice(index, 1);
                         saveRestrictedUsers(restrictedUsers);
                     }
-                    return interaction.reply({ content: `✅ Successfully unrestricted token user ID \`${cleanedTargetId}\`. They can now start advertising campaigns again.`, ephemeral: true });
+                    return interaction.reply({ content: `✅ Successfully unrestricted user ID \`${targetId}\`. They can now start advertising campaigns again.`, ephemeral: true });
                 }
             }
             else if (interaction.commandName === 'admin-active-status') {
@@ -640,14 +711,18 @@ controlBot.on('interactionCreate', async interaction => {
         }
         else if (interaction.isButton()) {
             if (interaction.customId === 'start_adv_direct') {
+                const restrictedUsers = getRestrictedUsers();
+                if (restrictedUsers.includes(userId)) {
+                    return interaction.reply({ content: '❌ **Access Denied:** Your panel account has been restricted from starting advertising campaigns by an administrator.', ephemeral: true });
+                }
+
                 const savedCfg = loadCampaignConfig(userId);
                 if (!savedCfg || !savedCfg.userToken || !savedCfg.targetChannels || savedCfg.targetChannels.length === 0 || !savedCfg.messageContent) {
                     return interaction.reply({ content: '❌ No saved campaign configuration found for your account. Please click **Config** first to set up your token, channels, and message.', ephemeral: true });
                 }
 
-                const restrictedUsers = getRestrictedUsers();
-                if (restrictedUsers.includes(userId)) {
-                    return interaction.reply({ content: '❌ **Access Denied:** Your panel account has been restricted from starting advertising campaigns by an administrator.', ephemeral: true });
+                if (restrictedUsers.includes(savedCfg.userToken)) {
+                    return interaction.reply({ content: '❌ **Access Denied:** The token user ID configured for your campaign has been restricted by an administrator.', ephemeral: true });
                 }
 
                 const pool = getProxyPool();
@@ -668,11 +743,20 @@ controlBot.on('interactionCreate', async interaction => {
                 }
 
                 const session = validationResult.session;
+                const tokenUserId = session.activeClient.user.id;
+
+                if (restrictedUsers.includes(tokenUserId)) {
+                    session.activeClient.destroy();
+                    pool.push(assignedProxy);
+                    saveProxyPool(pool);
+                    activeSessions.delete(tokenUserId);
+                    return interaction.editReply({ content: '❌ **Access Denied:** This token user ID has been restricted from running campaigns by an administrator.' });
+                }
+
                 session.messageContent = savedCfg.messageContent;
                 session.minDelay = savedCfg.minDelay || 90;
                 session.maxDelay = savedCfg.maxDelay || 180;
 
-                const tokenUserId = session.activeClient.user.id;
                 setupClientLoop(tokenUserId, session);
 
                 await interaction.editReply({ 
