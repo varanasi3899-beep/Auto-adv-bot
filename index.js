@@ -130,12 +130,27 @@ function saveProxyPool(proxies) {
 setInterval(() => {
     const memoryUsageMB = process.memoryUsage().rss / 1024 / 1024;
     if (memoryUsageMB >= 950) {
-        console.log(`[Memory Guardian] RAM usage reached ${memoryUsageMB.toFixed(2)} MB. Restarting process safely...`);
+        console.log(`[Memory Guardian] RAM usage reached ${memoryUsageMB.toFixed(2)} MB. Returning assigned proxies to pool and restarting process safely...`);
+        
+        const proxyPool = getProxyPool();
+        let poolUpdated = false;
+
         for (const [tokenUserId, session] of activeSessions.entries()) {
+            if (session.currentProxy) {
+                if (!proxyPool.includes(session.currentProxy)) {
+                    proxyPool.push(session.currentProxy);
+                    poolUpdated = true;
+                }
+            }
             if (session.activeClient) {
                 try { session.activeClient.destroy(); } catch {}
             }
         }
+
+        if (poolUpdated) {
+            saveProxyPool(proxyPool);
+        }
+
         process.exit(0);
     }
 }, 30000);
@@ -484,7 +499,6 @@ controlBot.on('interactionCreate', async interaction => {
                         if (session.panelUserId) {
                             panelUserIdsToNotify.add(session.panelUserId);
                         }
-                        // Stop and clean up session
                         if (session.currentProxy) {
                             const pool = getProxyPool();
                             if (!pool.includes(session.currentProxy)) {
@@ -506,7 +520,6 @@ controlBot.on('interactionCreate', async interaction => {
 
                     activeSessions.clear();
 
-                    // Send maintenance DM to each affected panel owner
                     for (const panelOwnerId of panelUserIdsToNotify) {
                         await notifyMaintenanceStopped(panelOwnerId);
                     }
