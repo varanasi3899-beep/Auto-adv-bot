@@ -127,11 +127,8 @@ function saveProxyPool(proxies) {
     }
 }
 
-setInterval(() => {
-    const memoryUsageMB = process.memoryUsage().rss / 1024 / 1024;
-    if (memoryUsageMB >= 950) {
-        console.log(`[Memory Guardian] RAM usage reached ${memoryUsageMB.toFixed(2)} MB. Returning assigned proxies to pool and restarting process safely...`);
-        
+function returnAllActiveProxies() {
+    try {
         const proxyPool = getProxyPool();
         let poolUpdated = false;
 
@@ -142,15 +139,53 @@ setInterval(() => {
                     poolUpdated = true;
                 }
             }
+        }
+
+        if (poolUpdated) {
+            saveProxyPool(proxyPool);
+            console.log('[Proxy Recovery] All active campaign proxies successfully returned to proxy pool.');
+        }
+    } catch (err) {
+        console.error('[Proxy Recovery Error]:', err);
+    }
+}
+
+// Safety hooks to ensure proxies return to pool on crashes, exits, or shutdowns
+process.on('exit', () => {
+    returnAllActiveProxies();
+});
+
+process.on('SIGINT', () => {
+    returnAllActiveProxies();
+    process.exit(0);
+});
+
+process.on('SIGTERM', () => {
+    returnAllActiveProxies();
+    process.exit(0);
+});
+
+process.on('uncaughtException', (err) => {
+    console.error('[Uncaught Exception]:', err);
+    returnAllActiveProxies();
+    process.exit(1);
+});
+
+setInterval(() => {
+    const memoryUsageMB = process.memoryUsage().rss / 1024 / 1024;
+    const heapUsedMB = process.memoryUsage().heapUsed / 1024 / 1024;
+    
+    // Trigger cleanup and restart before hitting V8 hard OOM limits (~500MB heap or 700MB RSS)
+    if (memoryUsageMB >= 700 || heapUsedMB >= 450) {
+        console.log(`[Memory Guardian] RAM usage reached RSS: ${memoryUsageMB.toFixed(2)} MB, Heap: ${heapUsedMB.toFixed(2)} MB. Returning assigned proxies to pool and restarting process safely...`);
+        
+        for (const [tokenUserId, session] of activeSessions.entries()) {
             if (session.activeClient) {
                 try { session.activeClient.destroy(); } catch {}
             }
         }
 
-        if (poolUpdated) {
-            saveProxyPool(proxyPool);
-        }
-
+        returnAllActiveProxies();
         process.exit(0);
     }
 }, 30000);
